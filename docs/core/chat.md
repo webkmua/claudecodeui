@@ -29,6 +29,8 @@
 
 `POST /api/providers/sessions` 的 `initialMessage` 只作标题来源，客户端只发前缀，不发整条消息——它正处在用户等待的那段窗口里。
 
+前端的 provider picker、默认选择与模型目录请求只遍历 `providerCatalogFallback.ts` 导出的部署 allow-list；因此单引擎/受限构建不会在首屏向禁用引擎发模型请求，也不会把旧的 localStorage 选择带入 `chat.send`。
+
 ## 断线恢复
 
 - `seq` 由 run registry 按 session 维护单调水位：跨 run 续数、不随缓冲驱逐失效，服务端单方定义，客户端只透传（取 max 对账）。重连后发 `chat.subscribe`（带 `lastSeq`）→ 活跃 run 从缓冲精确补发；ack 带权威 `lastSeq` 与 `stale` 标志——`stale: true` 表示 `lastSeq` 已落在缓冲窗之前（5000 条上限 / 5 分钟保留），客户端补一次 REST 刷新。完成态 run 不 replay，走 REST。

@@ -19,7 +19,11 @@ import {
   toProviderEffortOptions,
 } from '@/modules/chat/constants/providerEffort';
 import { readProviderToolsSettings } from '@/modules/chat/utils/chatStorage';
-import { PROVIDER_FALLBACK_CATALOG, PROVIDER_FALLBACK_ORDER } from '@/shared/providerCatalogFallback';
+import {
+  DEFAULT_ENABLED_PROVIDER,
+  ENABLED_PROVIDER_ORDER,
+  PROVIDER_FALLBACK_CATALOG,
+} from '@/shared/providerCatalogFallback';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 
 // Typed views over the shared fallback catalog (whose literal file must stay
@@ -33,13 +37,13 @@ const FALLBACK_PERMISSION_MODES = Object.fromEntries(
   Object.entries(PROVIDER_FALLBACK_CATALOG).map(([provider, entry]) => [provider, entry.permissionModes]),
 ) as Record<LLMProvider, PermissionMode[]>;
 
-const PROVIDERS: LLMProvider[] = [...PROVIDER_FALLBACK_ORDER];
+const PROVIDERS: LLMProvider[] = [...ENABLED_PROVIDER_ORDER];
 
 const readStoredProvider = (): LLMProvider => {
   const storedProvider = localStorage.getItem('selected-provider');
   return PROVIDERS.includes(storedProvider as LLMProvider)
     ? storedProvider as LLMProvider
-    : 'claude';
+    : DEFAULT_ENABLED_PROVIDER;
 };
 
 

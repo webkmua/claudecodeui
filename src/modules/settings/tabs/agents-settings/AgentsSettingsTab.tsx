@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import type { AgentCategory, AgentContextByProvider, AgentProvider, AgentSettingsProject, AntigravityPermissionMode, ClaudePermissionsState, CodexPermissionMode, CursorPermissionsState, ProviderAuthStatus, ZcodePermissionMode } from '@/shared/types';
+import { DEFAULT_ENABLED_PROVIDER, ENABLED_PROVIDER_ORDER } from '@/shared/providerCatalogFallback';
 import AgentCategoryContentSection from '@/modules/settings/tabs/agents-settings/sections/AgentCategoryContentSection';
 import AgentCategoryTabsSection from '@/modules/settings/tabs/agents-settings/sections/AgentCategoryTabsSection';
 import AgentSelectorSection from '@/modules/settings/tabs/agents-settings/sections/AgentSelectorSection';
@@ -39,7 +40,7 @@ export default function AgentsSettingsTab({
   onZcodePermissionModeChange,
   projects,
 }: AgentsSettingsTabProps) {
-  const [selectedAgent, setSelectedAgent] = useState<AgentProvider>('claude');
+  const [selectedAgent, setSelectedAgent] = useState<AgentProvider>(DEFAULT_ENABLED_PROVIDER);
   const [selectedCategory, setSelectedCategory] = useState<AgentCategory>('account');
   const visibleCategories = useMemo<AgentCategory[]>(() => (
     selectedAgent === 'opencode'
@@ -47,7 +48,7 @@ export default function AgentsSettingsTab({
       : ['account', 'permissions', 'mcp', 'skills']
   ), [selectedAgent]);
 
-  const allAgents: AgentProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'zcode', 'antigravity'];
+  const allAgents: AgentProvider[] = [...ENABLED_PROVIDER_ORDER];
 
   const visibleAgents = useMemo<AgentProvider[]>(() => {
     return allAgents.filter((agent) => providerAuthStatus[agent].installed);

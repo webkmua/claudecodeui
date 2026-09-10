@@ -20,12 +20,12 @@ import type {
   ProviderModelsDefinition,
 } from '@/shared/types';
 import type { ProviderAuthStatusMap } from '@/modules/provider-auth';
-import { PROVIDER_FALLBACK_ORDER } from '@/shared/providerCatalogFallback';
+import { ENABLED_PROVIDER_ORDER } from '@/shared/providerCatalogFallback';
 import { getProviderDisplayName } from '@/shared/providerDisplay';
 
 // Order and labels derive from the canonical provider order and the shared
 // display-name table.
-const ALL_PROVIDERS: Array<{ id: LLMProvider; label: string }> = PROVIDER_FALLBACK_ORDER.map(
+const ALL_PROVIDERS: Array<{ id: LLMProvider; label: string }> = ENABLED_PROVIDER_ORDER.map(
   (id) => ({ id, label: getProviderDisplayName(id) }),
 );
 

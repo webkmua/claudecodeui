@@ -20,6 +20,7 @@ import {
   serialize,
 } from '@/modules/project-workspace/utils/projectsMerge';
 import { readSelectedProvider } from '@/shared/selectedProvider';
+import { DEFAULT_ENABLED_PROVIDER } from '@/shared/providerCatalogFallback';
 
 type UseProjectsStateArgs = {
   sessionId?: string;
@@ -134,7 +135,7 @@ const renameSessionInProject = (project: Project, sessionIdToRename: string, sum
   return { ...project, sessions: nextSessions };
 };
 
-const DEFAULT_PROVIDER: LLMProvider = 'claude';
+const DEFAULT_PROVIDER: LLMProvider = DEFAULT_ENABLED_PROVIDER;
 
 const getSessionProvider = (session: ProjectSession): LLMProvider => {
   const provider = session.__provider ?? session.provider;

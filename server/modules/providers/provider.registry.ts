@@ -8,29 +8,36 @@ import type { IProvider } from '@/shared/interfaces.js';
 import type { LLMProvider } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
 
-const providers: Record<LLMProvider, IProvider> = {
-  claude: new ClaudeProvider(),
-  codex: new CodexProvider(),
-  cursor: new CursorProvider(),
-  opencode: new OpenCodeProvider(),
-  zcode: new ZCodeProvider(),
-  antigravity: new AntigravityProvider(),
+import { resolveEnabledProviderIds } from './provider-availability.js';
+
+const providerFactories: Record<LLMProvider, () => IProvider> = {
+  claude: () => new ClaudeProvider(),
+  codex: () => new CodexProvider(),
+  cursor: () => new CursorProvider(),
+  opencode: () => new OpenCodeProvider(),
+  zcode: () => new ZCodeProvider(),
+  antigravity: () => new AntigravityProvider(),
 };
+
+const enabledProviderIds = resolveEnabledProviderIds();
+const providers = new Map<LLMProvider, IProvider>(
+  [...enabledProviderIds].map((providerId) => [providerId, providerFactories[providerId]()]),
+);
 
 /**
  * Central registry for resolving concrete provider implementations by id.
  */
 export const providerRegistry = {
   listProviders(): IProvider[] {
-    return Object.values(providers);
+    return [...providers.values()];
   },
 
   resolveProvider(provider: string): IProvider {
     const key = provider as LLMProvider;
-    const resolvedProvider = providers[key];
+    const resolvedProvider = providers.get(key);
     if (!resolvedProvider) {
-      throw new AppError(`Unsupported provider "${provider}".`, {
-        code: 'UNSUPPORTED_PROVIDER',
+      throw new AppError(`Provider "${provider}" is unavailable in this deployment.`, {
+        code: 'PROVIDER_UNAVAILABLE',
         statusCode: 400,
       });
     }

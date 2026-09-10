@@ -1,4 +1,4 @@
-import { PROVIDER_FALLBACK_ORDER } from '@/shared/providerCatalogFallback';
+import { DEFAULT_ENABLED_PROVIDER, ENABLED_PROVIDER_ORDER } from '@/shared/providerCatalogFallback';
 import type { LLMProvider } from '@/shared/types';
 import { readUserPreference, writeUserPreference } from '@/shared/userSettings';
 
@@ -18,9 +18,9 @@ import { readUserPreference, writeUserPreference } from '@/shared/userSettings';
  */
 
 // The app-wide canonical provider set and order (see providerCatalogFallback).
-const PROVIDERS: LLMProvider[] = [...PROVIDER_FALLBACK_ORDER];
+const PROVIDERS: LLMProvider[] = [...ENABLED_PROVIDER_ORDER];
 
-const DEFAULT_PROVIDER: LLMProvider = 'claude';
+const DEFAULT_PROVIDER: LLMProvider = DEFAULT_ENABLED_PROVIDER;
 
 export function readSelectedProvider(): LLMProvider {
   const stored = readUserPreference<string | null>('selectedProvider', null);

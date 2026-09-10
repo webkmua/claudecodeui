@@ -29,7 +29,8 @@ React 18 + TypeScript + Vite 7（`vite.config.js`，别名 `@` → `src/`，`@sh
 ## Provider 相关前端（零分支原则）
 
 - **能力/目录的唯一来源是后端**：`useProviderCapabilities`（`GET /api/providers/capabilities`）+ `useChatProviderState`（`GET /api/providers/<p>/models` 拉统一模型目录，合成 `providerModelCatalog`）。
-- **回退镜像**：`src/shared/providerCatalogFallback.ts` 只用于首屏与请求失败兜底，由 parity 测试钉住与后端一致；**其 key 顺序是全应用引擎规范顺序**（一处改动不要在别处另排顺序）。
+- **回退镜像**：`src/shared/providerCatalogFallback.ts` 用于首屏与请求失败兜底，由 parity 测试钉住与后端一致；**其 key 顺序是全应用引擎规范顺序**。该模块也校验 `VITE_CLOUDCLI_ENABLED_PROVIDERS` 的 build-time 部署 allow-list，并导出当前 build 可见的引擎顺序（不要在别处另排顺序）；服务端对应运行时变量为 `CLOUDCLI_ENABLED_PROVIDERS`。
+- **部署 allow-list**：provider picker、模型请求、登录状态与 Agents 设置只枚举上述 build-time 列表；未设置时保持六家完整 UI。
 - 本地选择持久化为 `<provider>-model` / `<provider>-effort`（`useChatProviderState` 直接读写 localStorage，设备本地，不经 preference store）。
 - 引擎外观：`src/shared/providerDisplay.ts`（显示名）、`src/shared/ui/LLMProviderLogo.tsx`（Logo）。
 

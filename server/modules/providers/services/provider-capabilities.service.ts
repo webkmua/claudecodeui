@@ -63,17 +63,13 @@ function deriveCapabilities(providerId: LLMProvider, provider: {
  */
 export const providerCapabilitiesService = {
   getProviderCapabilities(provider: LLMProvider): ProviderCapabilities {
-    return DERIVED_CAPABILITIES[provider];
+    const enabledProvider = providerRegistry.resolveProvider(provider);
+    return deriveCapabilities(provider, enabledProvider);
   },
 
   listAllProviderCapabilities(): ProviderCapabilities[] {
-    return Object.values(DERIVED_CAPABILITIES);
+    return providerRegistry.listProviders().map((provider) => (
+      deriveCapabilities(provider.id, provider)
+    ));
   },
 };
-
-const DERIVED_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = Object.fromEntries(
-  providerRegistry.listProviders().map((provider) => [
-    provider.id,
-    deriveCapabilities(provider.id, provider),
-  ]),
-) as Record<LLMProvider, ProviderCapabilities>;

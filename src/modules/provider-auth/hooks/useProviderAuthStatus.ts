@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 
 import { api } from '@/shared/api';
+import { ENABLED_PROVIDER_ORDER } from '@/shared/providerCatalogFallback';
 import type {
   LLMProvider,
   ProviderAuthStatus,
@@ -8,7 +9,7 @@ import type {
   ProviderAuthSubscriptionOverride,
 } from '@/shared/types';
 
-const CLI_PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'zcode', 'antigravity'];
+const CLI_PROVIDERS: LLMProvider[] = [...ENABLED_PROVIDER_ORDER];
 
 const createInitialProviderAuthStatus = (loading = true) => ({
   installed: false,

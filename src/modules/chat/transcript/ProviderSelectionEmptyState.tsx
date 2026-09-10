@@ -25,7 +25,7 @@ import {
 } from "@/shared/ui";
 import ModelGroupList, { type ModelGroup } from "@/modules/chat/composer/ModelGroupList";
 import ModelLibraryPanel from "@/modules/chat/modals/ModelLibraryPanel";
-import { PROVIDER_FALLBACK_ORDER } from '@/shared/providerCatalogFallback';
+import { ENABLED_PROVIDER_ORDER } from '@/shared/providerCatalogFallback';
 import { getProviderDisplayName } from '@/shared/providerDisplay';
 import { writeSelectedProvider } from '@/shared/selectedProvider';
 
@@ -40,7 +40,7 @@ const PROVIDER_VENDOR_NAMES: Record<LLMProvider, string> = {
   zcode: "ZCode",
   antigravity: "Antigravity",
 };
-const PROVIDER_META: { id: LLMProvider; name: string }[] = PROVIDER_FALLBACK_ORDER.map(
+const PROVIDER_META: { id: LLMProvider; name: string }[] = ENABLED_PROVIDER_ORDER.map(
   (id) => ({ id, name: PROVIDER_VENDOR_NAMES[id] }),
 );
 
