@@ -363,8 +363,8 @@ async function startServer() {
         const distIndexPath = path.join(APP_ROOT, 'dist', 'index.html');
         const isProduction = fs.existsSync(distIndexPath);
 
-        // Log Claude implementation mode
-        console.log(`${terminalTextStyles.info('[INFO]')} Using Claude Agents SDK for Claude integration`);
+        const enabledProviders = process.env.CLOUDCLI_ENABLED_PROVIDERS?.trim() || 'all upstream providers';
+        console.log(`${terminalTextStyles.info('[INFO]')} Enabled providers: ${enabledProviders}`);
         console.log('');
 
         if (isProduction) {
