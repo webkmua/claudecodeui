@@ -401,6 +401,7 @@ export function installPluginFromGit(url) {
         const npmProcess = spawn('npm', ['install', '--ignore-scripts'], {
           cwd: tempDir,
           stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, NODE_ENV: 'development' },
         });
 
         npmProcess.on('close', (npmCode) => {
@@ -469,6 +470,7 @@ export function updatePluginFromGit(name) {
         const npmProcess = spawn('npm', ['install', '--ignore-scripts'], {
           cwd: pluginDir,
           stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, NODE_ENV: 'development' },
         });
         npmProcess.on('close', (npmCode) => {
           if (npmCode !== 0) {

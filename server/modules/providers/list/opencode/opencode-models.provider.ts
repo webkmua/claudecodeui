@@ -115,6 +115,8 @@ export const OPENCODE_PREDEFINED_MODELS: ProviderModelsDefinition = {
       },
     },
     { value: 'opencode-go/glm-5.1', label: 'GLM 5.1', description: 'OpenCode Go' },
+    { value: 'zai/glm-5.3-flash', label: 'GLM 5.3 Flash (ccr)', description: 'Z.AI GLM (ccr)' },
+    { value: 'zai/glm-5.3', label: 'GLM 5.3 (ccr)', description: 'Z.AI GLM (ccr)' },
     {
       value: 'opencode-go/gpt-5.6-luna',
       label: 'GPT 5.6 Luna',

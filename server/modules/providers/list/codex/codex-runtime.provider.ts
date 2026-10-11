@@ -641,6 +641,8 @@ async function queryCodex(
       approvalPolicy,
       config: {
         'features.defer_mailbox_preemption': true,
+        // TASK-2026-00191: route Z.AI/* picker models through ccr
+        ...(typeof resolvedModel === 'string' && resolvedModel.startsWith('Z.AI/') ? { model_provider: 'ccr' } : {}),
       },
       ...(resolvedModel ? { model: resolvedModel } : {}),
     };
