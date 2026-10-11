@@ -28,6 +28,7 @@ const createInitialProviderAuthStatusMap = (loading = true): ProviderAuthStatusM
   opencode: createInitialProviderAuthStatus(loading),
   zcode: createInitialProviderAuthStatus(loading),
   antigravity: createInitialProviderAuthStatus(loading),
+  hermes: createInitialProviderAuthStatus(loading),
 });
 
 type ProviderAuthStatusPayload = {

@@ -50,4 +50,10 @@ export const MCP_FALLBACK_CAPABILITIES = {
     supportsWorkingDirectory: false,
     supportsEnvVarIndirection: false,
   },
+  hermes: {
+    scopes: ['user', 'project'],
+    transports: ['stdio', 'http'],
+    supportsWorkingDirectory: false,
+    supportsEnvVarIndirection: false,
+  },
 } as const;

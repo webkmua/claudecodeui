@@ -164,6 +164,26 @@ const BASELINE: Record<string, Omit<ProviderCapabilities, 'provider'>> = {
       supportsEnvVarIndirection: false,
     },
   },
+  hermes: {
+    permissionModes: ['default'],
+    defaultPermissionMode: 'default',
+    supportsImages: true,
+    supportsFiles: true,
+    supportsAbort: true,
+    supportsPermissionRequests: true,
+    supportsTokenUsage: false,
+    supportsQuota: false,
+    supportsQuotaReset: false,
+    supportsEffort: false,
+    supportsMessageEditing: false,
+    supportsSessionForking: false,
+    mcp: {
+      scopes: ['user', 'project'],
+      transports: ['stdio', 'http'],
+      supportsWorkingDirectory: false,
+      supportsEnvVarIndirection: false,
+    },
+  },
 };
 
 test('the derived matrix matches the reviewed baseline', () => {
@@ -196,6 +216,7 @@ test('the catalog default model equals each provider models definition DEFAULT',
   const { OPENCODE_PREDEFINED_MODELS } = await import('../list/opencode/opencode-models.provider.js');
   const { ZCODE_BUILTIN_MODELS } = await import('../list/zcode/zcode-models.provider.js');
   const { ANTIGRAVITY_BUILTIN_MODELS } = await import('../list/antigravity/antigravity-models.provider.js');
+  const { HERMES_FALLBACK_MODELS } = await import('../list/hermes/hermes-models.provider.js');
 
   const defaults = {
     claude: CLAUDE_PREDEFINED_MODELS.DEFAULT,
@@ -204,6 +225,7 @@ test('the catalog default model equals each provider models definition DEFAULT',
     opencode: OPENCODE_PREDEFINED_MODELS.DEFAULT,
     zcode: ZCODE_BUILTIN_MODELS.DEFAULT,
     antigravity: ANTIGRAVITY_BUILTIN_MODELS.DEFAULT,
+    hermes: HERMES_FALLBACK_MODELS.DEFAULT,
   };
 
   for (const [provider, defaultModel] of Object.entries(defaults)) {

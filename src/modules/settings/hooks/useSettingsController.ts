@@ -219,13 +219,20 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
     }
   }, []);
 
-  const openLoginForProvider = useCallback((provider: AgentProvider) => {
+  const [customLoginCommand, setCustomLoginCommand] = useState<string | undefined>();
+  const [customLoginTitle, setCustomLoginTitle] = useState<string | undefined>();
+
+  const openLoginForProvider = useCallback((provider: AgentProvider, customCommand?: string, customTitle?: string) => {
     setLoginProvider(provider);
+    setCustomLoginCommand(customCommand);
+    setCustomLoginTitle(customTitle);
     setShowLoginModal(true);
   }, []);
 
   const closeLoginModal = useCallback(() => {
     setShowLoginModal(false);
+    setCustomLoginCommand(undefined);
+    setCustomLoginTitle(undefined);
     void refreshProviderAuthStatuses();
   }, [refreshProviderAuthStatuses]);
 
@@ -407,6 +414,8 @@ export function useSettingsController({ isOpen, initialTab }: UseSettingsControl
     setShowLoginModal,
     closeLoginModal,
     loginProvider,
+    customLoginCommand,
+    customLoginTitle,
     handleLoginComplete,
   };
 }

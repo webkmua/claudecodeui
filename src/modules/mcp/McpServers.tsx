@@ -23,6 +23,7 @@ const MCP_PROVIDER_BUTTON_CLASSES: Record<McpProvider, string> = {
   opencode: 'bg-primary text-primary-foreground hover:bg-primary/90',
   zcode: 'bg-primary text-primary-foreground hover:bg-primary/90',
   antigravity: 'bg-primary text-primary-foreground hover:bg-primary/90',
+  hermes: 'bg-primary text-primary-foreground hover:bg-primary/90',
 };
 
 const getTransportIcon = (transport: string | undefined) => {

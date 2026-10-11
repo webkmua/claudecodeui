@@ -149,6 +149,7 @@ export const MCP_PROVIDER_NAMES: Record<McpProvider, string> = {
   opencode: 'OpenCode',
   zcode: 'ZCode',
   antigravity: 'Antigravity',
+  hermes: 'Hermes',
 };
 
 /** Transports offered when configuring a global (provider-agnostic) MCP server. */
@@ -224,4 +225,5 @@ export const PROVIDER_PERMISSION_PREFERENCE_KEYS: Record<LLMProvider, UserPrefer
   opencode: 'opencodePermissions',
   zcode: 'zcodePermissions',
   antigravity: 'antigravityPermissions',
+  hermes: 'hermesPermissions',
 };

@@ -63,6 +63,8 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
     showLoginModal,
     closeLoginModal,
     loginProvider,
+    customLoginCommand,
+    customLoginTitle,
     handleLoginComplete,
   } = useSettingsController({
     isOpen,
@@ -292,7 +294,8 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
         isOpen={showLoginModal}
         onClose={closeLoginModal}
         provider={loginProvider || 'claude'}
-        customCommand={loginProvider ? providerAuthStatus[loginProvider].loginCommand ?? undefined : undefined}
+        customCommand={customLoginCommand ?? (loginProvider ? providerAuthStatus[loginProvider].loginCommand ?? undefined : undefined)}
+        customTitle={customLoginTitle}
         onComplete={handleLoginComplete}
         isAuthenticated={isAuthenticated}
       />

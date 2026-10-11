@@ -1195,7 +1195,7 @@ export type AgentContextByProvider = Record<AgentProvider, AgentContext>;
 /** The per-provider data the agents settings tab hands to its sections: that provider's auth status and the callback that starts its login flow. */
 export type AgentContext = {
   authStatus: ProviderAuthStatus;
-  onLogin: () => void;
+  onLogin: (customCommand?: string, customTitle?: string) => void;
 };
 
 /** Identifier of a top-level section in the settings dialog; use it whenever a tab is stored, compared or requested so deep links, the sidebar and the command palette all agree on the same set of names. */
@@ -1205,7 +1205,7 @@ export type SettingsMainTab = 'agents' | 'sessions' | 'appearance' | 'git' | 'ap
 export type AgentProvider = LLMProvider;
 
 /** One category of per-agent configuration in the agents settings tab (account, permissions, MCP servers or skills); use it to key which panel the tab renders. */
-export type AgentCategory = 'account' | 'permissions' | 'mcp' | 'skills';
+export type AgentCategory = 'account' | 'permissions' | 'mcp' | 'skills' | 'gateway';
 
 /** How much Codex may do without asking, from prompting on every edit to bypassing permission checks entirely; persisted as the Codex agent's permission setting. */
 export type CodexPermissionMode = 'default' | 'acceptEdits' | 'bypassPermissions';
@@ -1557,6 +1557,32 @@ export type ProviderSkillCreateEntryPayload = {
     content: string;
     encoding: 'base64';
   }>;
+};
+
+export type ProviderSkillCreatePayload = {
+  entries: ProviderSkillCreateEntryPayload[];
+};
+
+export type ProviderSkillRegistryResult = {
+  name: string;
+  identifier: string;
+  source?: string;
+  trustLevel?: string;
+  description?: string;
+};
+
+export type ProviderSkillRegistrySearchResponse = {
+  provider: SkillsProvider;
+  results: ProviderSkillRegistryResult[];
+};
+
+export type ProviderSkillRegistryActionResponse = {
+  provider: SkillsProvider;
+  result: {
+    ok: boolean;
+    stdout: string;
+    stderr: string;
+  };
 };
 
 // ---------------------------

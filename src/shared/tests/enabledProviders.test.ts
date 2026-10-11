@@ -11,6 +11,7 @@ describe('resolveFrontendEnabledProviders', () => {
       'opencode',
       'zcode',
       'antigravity',
+      'hermes',
     ]);
   });
 

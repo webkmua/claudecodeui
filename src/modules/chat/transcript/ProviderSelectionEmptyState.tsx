@@ -39,6 +39,7 @@ const PROVIDER_VENDOR_NAMES: Record<LLMProvider, string> = {
   opencode: "OpenCode",
   zcode: "ZCode",
   antigravity: "Antigravity",
+  hermes: "Nous Research",
 };
 const PROVIDER_META: { id: LLMProvider; name: string }[] = ENABLED_PROVIDER_ORDER.map(
   (id) => ({ id, name: PROVIDER_VENDOR_NAMES[id] }),
@@ -332,6 +333,10 @@ export default function ProviderSelectionEmptyState({
                 antigravity: t("providerSelection.readyPrompt.antigravity", {
                   model: providerModels.antigravity,
                   defaultValue: "Ready with Antigravity {{model}}",
+                }),
+                hermes: t("providerSelection.readyPrompt.hermes", {
+                  model: currentModelLabel || providerModels.hermes,
+                  defaultValue: "Ready with Hermes ({{model}})",
                 }),
               }[provider]
             }

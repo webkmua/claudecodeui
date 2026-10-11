@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api } from '@/shared/api';
-import type { ProviderSkill, ProviderSkillCreateEntryPayload, SkillsProject, SkillsProvider, SkillsScope } from '@/shared/types';
+import type {
+  ProviderSkill,
+  ProviderSkillCreateEntryPayload,
+  ProviderSkillRegistryActionResponse,
+  ProviderSkillRegistryResult,
+  ProviderSkillRegistrySearchResponse,
+  SkillsProject,
+  SkillsProvider,
+  SkillsScope,
+} from '@/shared/types';
 
 type ProviderSkillCreatePayload = {
   entries: ProviderSkillCreateEntryPayload[];
@@ -206,6 +215,53 @@ const saveProviderSkills = async (
   return (data.data.skills || []).map((skill) => normalizeSkill(provider, skill));
 };
 
+const searchProviderSkillRegistry = async (
+  provider: SkillsProvider,
+  query: string,
+  limit = 10,
+): Promise<ProviderSkillRegistryResult[]> => {
+  const response = await api.providers.searchSkillsRegistry(provider, { query, limit });
+  const data = await toResponseJson<ApiResponse<ProviderSkillRegistrySearchResponse>>(response);
+  if (!response.ok || !data.success) {
+    throw new Error(getApiErrorMessage(data, 'Failed to search skill registry'));
+  }
+  return data.data.results || [];
+};
+
+const runProviderSkillRegistryAction = async (
+  provider: SkillsProvider,
+  action: 'install' | 'check' | 'update' | 'audit',
+  payload?: Record<string, unknown>,
+): Promise<ProviderSkillRegistryActionResponse['result']> => {
+  let response: Response;
+  if (action === 'install') {
+    response = await api.providers.installRegistrySkill(provider, payload);
+  } else if (action === 'check') {
+    response = await api.providers.checkRegistrySkills(provider);
+  } else if (action === 'update') {
+    response = await api.providers.updateRegistrySkills(provider);
+  } else {
+    response = await api.providers.auditRegistrySkills(provider);
+  }
+  const data = await toResponseJson<ApiResponse<ProviderSkillRegistryActionResponse>>(response);
+  if (!response.ok || !data.success) {
+    throw new Error(getApiErrorMessage(data, `Failed to run ${action}`));
+  }
+  return data.data.result;
+};
+
+const uninstallProviderSkillRegistrySkill = async (
+  provider: SkillsProvider,
+  name: string,
+): Promise<ProviderSkillRegistryActionResponse['result']> => {
+  const response = await api.providers.uninstallRegistrySkill(provider, name);
+  const data = await toResponseJson<ApiResponse<ProviderSkillRegistryActionResponse>>(response);
+  if (!response.ok || !data.success) {
+    throw new Error(getApiErrorMessage(data, 'Failed to uninstall skill'));
+  }
+  return data.data.result;
+};
+
 const getCacheKey = (provider: SkillsProvider, projects: ProjectTarget[]): string => {
   const projectKey = JSON.stringify(projects);
   return `${provider}:${projectKey}`;
@@ -230,6 +286,10 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
   const [isLoadingProjectScopes, setIsLoadingProjectScopes] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<'success' | 'error' | null>(null);
+  const [registryResults, setRegistryResults] = useState<ProviderSkillRegistryResult[]>([]);
+  const [registryError, setRegistryError] = useState<string | null>(null);
+  const [registryStatus, setRegistryStatus] = useState<string | null>(null);
+  const [registryBusyKey, setRegistryBusyKey] = useState<string | null>(null);
   const activeLoadIdRef = useRef(0);
 
   const serializedProjectTargets = JSON.stringify(createProjectTargets(currentProjects));
@@ -263,7 +323,10 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
     setIsLoadingProjectScopes(false);
     setLoadError(null);
 
-    let nextSkills = cachedEntry && !options.force ? cachedEntry.skills : [];
+    // Build the authoritative list from the fresh fetches only. The cache still
+    // feeds instant display above, but seeding the merge from it would let
+    // skills deleted out-of-band survive the union and never get pruned.
+    let nextSkills: ProviderSkill[] = [];
     let firstError: string | null = null;
 
     try {
@@ -332,6 +395,76 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
     }
   }, [refreshSkills, selectedProvider]);
 
+  const searchRegistry = useCallback(async (query: string) => {
+    const normalizedQuery = query.trim();
+    if (!normalizedQuery) {
+      setRegistryResults([]);
+      setRegistryError(null);
+      return;
+    }
+
+    setRegistryBusyKey('search');
+    setRegistryError(null);
+    setRegistryStatus(null);
+    try {
+      setRegistryResults(await searchProviderSkillRegistry(selectedProvider, normalizedQuery, 12));
+    } catch (error) {
+      setRegistryError(error instanceof Error ? error.message : 'Failed to search skill registry');
+    } finally {
+      setRegistryBusyKey((current) => (current === 'search' ? null : current));
+    }
+  }, [selectedProvider]);
+
+  const installRegistrySkill = useCallback(async (identifier: string) => {
+    setRegistryBusyKey(`install:${identifier}`);
+    setRegistryError(null);
+    setRegistryStatus(null);
+    try {
+      await runProviderSkillRegistryAction(selectedProvider, 'install', { identifier });
+      clearProviderSkillCache(selectedProvider);
+      await refreshSkills({ force: true });
+      setRegistryStatus('Skill installed.');
+    } catch (error) {
+      setRegistryError(error instanceof Error ? error.message : 'Failed to install skill');
+    } finally {
+      setRegistryBusyKey((current) => (current === `install:${identifier}` ? null : current));
+    }
+  }, [refreshSkills, selectedProvider]);
+
+  const uninstallRegistrySkill = useCallback(async (name: string) => {
+    setRegistryBusyKey(`uninstall:${name}`);
+    setRegistryError(null);
+    setRegistryStatus(null);
+    try {
+      await uninstallProviderSkillRegistrySkill(selectedProvider, name);
+      clearProviderSkillCache(selectedProvider);
+      await refreshSkills({ force: true });
+      setRegistryStatus('Skill uninstalled.');
+    } catch (error) {
+      setRegistryError(error instanceof Error ? error.message : 'Failed to uninstall skill');
+    } finally {
+      setRegistryBusyKey((current) => (current === `uninstall:${name}` ? null : current));
+    }
+  }, [refreshSkills, selectedProvider]);
+
+  const runRegistryMaintenance = useCallback(async (action: 'check' | 'update' | 'audit') => {
+    setRegistryBusyKey(action);
+    setRegistryError(null);
+    setRegistryStatus(null);
+    try {
+      const result = await runProviderSkillRegistryAction(selectedProvider, action);
+      if (action === 'update' || action === 'audit') {
+        clearProviderSkillCache(selectedProvider);
+        await refreshSkills({ force: true });
+      }
+      setRegistryStatus((result.stdout || result.stderr || `${action} completed.`).trim());
+    } catch (error) {
+      setRegistryError(error instanceof Error ? error.message : `Failed to run ${action}`);
+    } finally {
+      setRegistryBusyKey((current) => (current === action ? null : current));
+    }
+  }, [refreshSkills, selectedProvider]);
+
   useEffect(() => {
     void refreshSkills();
 
@@ -342,6 +475,10 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
 
   useEffect(() => {
     setSaveStatus(null);
+    setRegistryResults([]);
+    setRegistryError(null);
+    setRegistryStatus(null);
+    setRegistryBusyKey(null);
   }, [selectedProvider]);
 
   useEffect(() => {
@@ -359,7 +496,15 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
     isLoadingProjectScopes,
     loadError,
     saveStatus,
+    registryResults,
+    registryError,
+    registryStatus,
+    registryBusyKey,
     addSkills,
     refreshSkills,
+    searchRegistry,
+    installRegistrySkill,
+    uninstallRegistrySkill,
+    runRegistryMaintenance,
   };
 }

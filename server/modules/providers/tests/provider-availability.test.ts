@@ -6,7 +6,7 @@ import { resolveEnabledProviderIds } from '../provider-availability.js';
 test('an unset provider allow-list preserves every provider', () => {
   assert.deepEqual(
     [...resolveEnabledProviderIds(undefined)],
-    ['claude', 'codex', 'cursor', 'opencode', 'zcode', 'antigravity'],
+    ['claude', 'codex', 'cursor', 'opencode', 'zcode', 'antigravity', 'hermes'],
   );
 });
 

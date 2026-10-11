@@ -1,4 +1,4 @@
-import type { LLMProvider, ProviderAuthStatusMap } from '@/shared/types';
+import type { ProviderAuthStatusMap } from '@/shared/types';
 
 export type { ProviderAuthStatus, ProviderAuthStatusMap } from '@/shared/types';
 
@@ -9,4 +9,5 @@ export const createInitialProviderAuthStatusMap = (loading = true): ProviderAuth
   opencode: { installed: true, authenticated: false, email: null, method: null, error: null, loginCommand: null, loading },
   zcode: { installed: true, authenticated: false, email: null, method: null, error: null, loginCommand: null, loading },
   antigravity: { installed: true, authenticated: false, email: null, method: null, error: null, loginCommand: null, loading },
+  hermes: { installed: true, authenticated: false, email: null, method: null, error: null, loginCommand: null, loading },
 });

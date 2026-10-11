@@ -265,7 +265,7 @@ export default function Shell({
 
   if (minimal) {
     return (
-      <>
+      <div className="relative flex h-full w-full flex-1 min-h-0 flex-col overflow-hidden bg-gray-900">
         <ShellMinimalView terminalContainerRef={terminalContainerRef} />
         <TerminalShortcutsPanel
           wsRef={wsRef}
@@ -273,7 +273,7 @@ export default function Shell({
           isConnected={isConnected}
           bottomOffset="bottom-0"
         />
-      </>
+      </div>
     );
   }
 

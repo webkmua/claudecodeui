@@ -22,7 +22,7 @@
  * Use this as the source of truth whenever a function or payload needs to identify
  * a specific LLM integration.
  */
-export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'zcode' | 'antigravity';
+export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'zcode' | 'antigravity' | 'hermes';
 
 /**
  * Message/event variants emitted by provider adapters and normalized transports.

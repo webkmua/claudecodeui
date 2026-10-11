@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDropzone } from 'react-dropzone';
 import {
   CheckCircle2,
+  Compass,
   FileCode2,
   FileText,
   FileUp,
@@ -11,12 +12,14 @@ import {
   RefreshCw,
   Search,
   Upload,
+  Wrench,
   X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/shared/utils';
 import {
+  ActionMenu,
   Badge,
   Button,
   Dialog,
@@ -56,6 +59,7 @@ const PROVIDER_NAMES: Record<SkillsProvider, string> = {
   opencode: 'OpenCode',
   zcode: 'ZCode',
   antigravity: 'Antigravity',
+  hermes: 'Hermes',
 };
 
 const PROVIDER_SKILL_PATHS: Record<Exclude<SkillsProvider, 'opencode'>, string> = {
@@ -68,7 +72,29 @@ const PROVIDER_SKILL_PATHS: Record<Exclude<SkillsProvider, 'opencode'>, string> 
   // Antigravity writes user skills to the shared .agents/skills ecosystem;
   // it also reads ~/.gemini/antigravity/skills (see antigravity-skills.provider).
   antigravity: '~/.agents/skills/<skill-name>/SKILL.md',
+  hermes: '~/.hermes/skills/<skill-name>/SKILL.md',
 };
+
+const HERMES_SKILL_ACTIONS = [
+  {
+    label: 'Check Updates',
+    description: 'Check installed hub skills.',
+    action: 'check' as const,
+    icon: RefreshCw,
+  },
+  {
+    label: 'Update Hub Skills',
+    description: 'Apply available hub updates.',
+    action: 'update' as const,
+    icon: Upload,
+  },
+  {
+    label: 'Audit Installed',
+    description: 'Re-scan installed hub skills.',
+    action: 'audit' as const,
+    icon: CheckCircle2,
+  },
+];
 
 const SCOPE_BADGE_CLASSES: Record<SkillsScope, string> = {
   user: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
@@ -200,15 +226,24 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
     isLoadingProjectScopes,
     loadError,
     saveStatus,
+    registryResults,
+    registryError,
+    registryStatus,
+    registryBusyKey,
     addSkills,
     refreshSkills,
+    searchRegistry,
+    installRegistrySkill,
+    runRegistryMaintenance,
   } = useProviderSkills({ selectedProvider, currentProjects });
   const [queuedFiles, setQueuedFiles] = useState<QueuedSkillFile[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [justInstalled, setJustInstalled] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [registryQuery, setRegistryQuery] = useState('');
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
+  const [addMode, setAddMode] = useState<'upload' | 'hub'>('upload');
   const [showInstallPath, setShowInstallPath] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
@@ -221,7 +256,9 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
     setSubmitError(null);
     setIsSubmitting(false);
     setSearchQuery('');
+    setRegistryQuery('');
     setIsAddDialogOpen(false);
+    setAddMode('upload');
     setShowInstallPath(false);
     setJustInstalled(false);
   }, [selectedProvider]);
@@ -370,6 +407,7 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
       setSubmitError(null);
       setShowInstallPath(false);
       setJustInstalled(false);
+      setAddMode('upload');
       setIsAddDialogOpen(true);
       return;
     }
@@ -378,6 +416,7 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
     setSubmitError(null);
     setShowInstallPath(false);
     setJustInstalled(false);
+    setAddMode('upload');
     setIsAddDialogOpen(false);
   }, []);
 
@@ -506,6 +545,106 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
     </div>
   );
 
+  const hermesHubPanel = selectedProvider === 'hermes' ? (
+    <div className="flex min-h-full flex-col gap-4">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="relative min-w-0 flex-1">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            type="text"
+            value={registryQuery}
+            onChange={(event) => setRegistryQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                void searchRegistry(registryQuery);
+              }
+            }}
+            placeholder="Search Hermes skills..."
+            aria-label="Search Hermes skills registry"
+            className="h-9 w-full pl-9"
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-full sm:w-auto"
+          disabled={!registryQuery.trim() || registryBusyKey === 'search'}
+          onClick={() => void searchRegistry(registryQuery)}
+        >
+          {registryBusyKey === 'search' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+          Search
+        </Button>
+        <ActionMenu
+          label="Maintenance"
+          icon={Wrench}
+          className="w-full sm:w-auto"
+          triggerClassName="w-full sm:w-auto"
+          items={HERMES_SKILL_ACTIONS.map((action) => ({
+            key: action.action,
+            label: action.label,
+            description: action.description,
+            icon: action.icon,
+            loading: registryBusyKey === action.action,
+            disabled: Boolean(registryBusyKey && registryBusyKey !== action.action),
+            onSelect: () => void runRegistryMaintenance(action.action),
+          }))}
+        />
+      </div>
+
+      {registryResults.length > 0 && (
+        <div className="grid gap-2">
+          {registryResults.map((result) => (
+            <div
+              key={result.identifier}
+              className="flex flex-col gap-3 rounded-lg border border-border/70 bg-background/70 p-3 sm:flex-row sm:items-start sm:justify-between"
+            >
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-medium text-foreground">{result.name}</span>
+                  {result.source && (
+                    <Badge variant="outline" className="rounded-full text-[10px]">{result.source}</Badge>
+                  )}
+                  {result.trustLevel && (
+                    <Badge variant="secondary" className="rounded-full text-[10px]">{result.trustLevel}</Badge>
+                  )}
+                </div>
+                <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{result.identifier}</div>
+                {result.description && (
+                  <div className="mt-1 line-clamp-2 text-sm text-muted-foreground">{result.description}</div>
+                )}
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                className="w-full sm:w-auto"
+                disabled={registryBusyKey === `install:${result.identifier}`}
+                onClick={() => void installRegistrySkill(result.identifier)}
+              >
+                {registryBusyKey === `install:${result.identifier}`
+                  ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : <Upload className="h-4 w-4" />}
+                Install
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {registryResults.length === 0 && (
+        <div className="flex min-h-[220px] flex-1 items-center justify-center rounded-lg border border-dashed border-border/70 bg-muted/15 px-4 py-8 text-center">
+          <div className="max-w-sm space-y-2">
+            <Compass className="mx-auto h-6 w-6 text-muted-foreground" />
+            <div className="text-sm font-medium text-foreground">Search the Hermes Skills Hub</div>
+            <div className="text-sm text-muted-foreground">
+              Find installable Hermes skills by name, provider, source, or task.
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
+
   return (
     <div className="min-w-0 space-y-4 overflow-x-hidden">
       <div className="flex min-w-0 items-start gap-3">
@@ -580,12 +719,14 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
           <div className="flex-shrink-0 border-b border-border/60 px-4 py-4">
             <div className="flex items-start gap-3">
               <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/70 bg-muted/20 text-muted-foreground">
-                <FileUp className="h-4 w-4" />
+                {addMode === 'hub' ? <Compass className="h-4 w-4" /> : <FileUp className="h-4 w-4" />}
               </div>
               <div className="min-w-0 flex-1">
                 <div className="text-base font-medium text-foreground">{t('skillsPage.addDialogTitle', { provider: providerName })}</div>
                 <div className="mt-1 text-sm text-muted-foreground">
-                  {t('skillsPage.addDialogDescription')}
+                  {selectedProvider === 'hermes'
+                    ? 'Upload a local skill or install one from the Hermes Skills Hub.'
+                    : t('skillsPage.addDialogDescription')}
                 </div>
               </div>
               <Button
@@ -600,26 +741,53 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
                 <X className="h-4 w-4" />
               </Button>
             </div>
+
+            {selectedProvider === 'hermes' && (
+              <div className="mt-4 inline-flex rounded-lg border border-border/70 bg-muted/20 p-1">
+                <Button
+                  type="button"
+                  variant={addMode === 'upload' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8 shadow-none"
+                  onClick={() => setAddMode('upload')}
+                >
+                  <FileUp className="h-4 w-4" />
+                  Upload
+                </Button>
+                <Button
+                  type="button"
+                  variant={addMode === 'hub' ? 'secondary' : 'ghost'}
+                  size="sm"
+                  className="h-8 shadow-none"
+                  onClick={() => setAddMode('hub')}
+                >
+                  <Compass className="h-4 w-4" />
+                  Skills Hub
+                </Button>
+              </div>
+            )}
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
-            {uploadPanel}
+            {addMode === 'hub' && hermesHubPanel ? hermesHubPanel : uploadPanel}
           </div>
 
           <div className="flex flex-shrink-0 flex-col gap-3 border-t border-border/60 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 flex-1">
-              {(submitError || loadError || (justInstalled && saveStatus === 'success')) ? (
+              {(submitError || loadError || registryError || registryStatus || (justInstalled && saveStatus === 'success')) ? (
                 <div className={cn(
                   'max-h-24 overflow-y-auto whitespace-pre-wrap rounded-lg border px-3 py-2 text-sm',
-                  submitError || loadError
+                  submitError || loadError || registryError
                     ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-800/60 dark:bg-red-900/20 dark:text-red-200'
                     : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
                 )}>
-                  {submitError || loadError || t('skillsPage.savedSuccessfully')}
+                  {submitError || loadError || registryError || registryStatus || t('skillsPage.savedSuccessfully')}
                 </div>
               ) : (
                 <span className="text-xs text-muted-foreground">
-                  {t('skillsPage.footerHint')}
+                  {addMode === 'hub'
+                    ? 'Hub installs go to the Hermes skills directory automatically.'
+                    : t('skillsPage.footerHint')}
                 </span>
               )}
             </div>
@@ -634,18 +802,20 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
               >
                 {t('common:cancel')}
               </Button>
-              <Button
-                type="button"
-                size="sm"
-                className="w-full sm:w-auto"
-                onClick={() => void handleUploadInstall()}
-                disabled={isSubmitting || queuedFiles.length === 0}
-              >
-                {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-                {queuedFiles.length > 0
-                  ? t('skillsPage.installWithCount', { count: queuedFiles.length })
-                  : t('skillsPage.installPlain')}
-              </Button>
+              {addMode !== 'hub' && (
+                <Button
+                  type="button"
+                  size="sm"
+                  className="w-full sm:w-auto"
+                  onClick={() => void handleUploadInstall()}
+                  disabled={isSubmitting || queuedFiles.length === 0}
+                >
+                  {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+                  {queuedFiles.length > 0
+                    ? t('skillsPage.installWithCount', { count: queuedFiles.length })
+                    : t('skillsPage.installPlain')}
+                </Button>
+              )}
             </div>
           </div>
         </DialogContent>

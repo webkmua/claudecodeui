@@ -14,6 +14,7 @@ const PROVIDER_DISPLAY_NAMES: Record<LLMProvider, string> = {
   opencode: 'OpenCode',
   zcode: 'ZCode',
   antigravity: 'Antigravity',
+  hermes: 'Hermes',
 };
 
 /**

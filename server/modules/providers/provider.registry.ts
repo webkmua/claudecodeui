@@ -2,6 +2,7 @@ import { AntigravityProvider } from '@/modules/providers/list/antigravity/antigr
 import { ClaudeProvider } from '@/modules/providers/list/claude/claude.provider.js';
 import { CodexProvider } from '@/modules/providers/list/codex/codex.provider.js';
 import { CursorProvider } from '@/modules/providers/list/cursor/cursor.provider.js';
+import { HermesProvider } from '@/modules/providers/list/hermes/hermes.provider.js';
 import { OpenCodeProvider } from '@/modules/providers/list/opencode/opencode.provider.js';
 import { ZCodeProvider } from '@/modules/providers/list/zcode/zcode.provider.js';
 import type { IProvider } from '@/shared/interfaces.js';
@@ -17,6 +18,7 @@ const providerFactories: Record<LLMProvider, () => IProvider> = {
   opencode: () => new OpenCodeProvider(),
   zcode: () => new ZCodeProvider(),
   antigravity: () => new AntigravityProvider(),
+  hermes: () => new HermesProvider(),
 };
 
 const enabledProviderIds = resolveEnabledProviderIds();

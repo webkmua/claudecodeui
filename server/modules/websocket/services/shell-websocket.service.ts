@@ -50,7 +50,12 @@ export function isLoginShellCommand(initialCommand: string | null | undefined): 
     return false;
   }
   const command = initialCommand.trim();
-  return command === 'agy' || command.includes('login') || command.includes('setup-token');
+  return (
+    command === 'agy' ||
+    command.includes('login') ||
+    command.includes('setup-token') ||
+    command.startsWith('hermes')
+  );
 }
 
 function normalizeDetectedUrl(url: string): string | null {
@@ -208,6 +213,11 @@ const SHELL_PROVIDER_CLI: Record<string, {
     name: 'Antigravity',
     launch: 'agy',
     resume: (id) => `agy --conversation "${id}"`,
+  },
+  hermes: {
+    name: 'Hermes',
+    launch: (process.env.HERMES_COMMAND_PATH || process.env.HERMES_CLI_PATH || 'hermes').trim().split(/\s+/)[0] || 'hermes',
+    resume: (id) => `${(process.env.HERMES_COMMAND_PATH || process.env.HERMES_CLI_PATH || 'hermes').trim().split(/\s+/)[0] || 'hermes'} --resume "${id}"`,
   },
 };
 

@@ -72,6 +72,15 @@ const agentConfig: Record<AgentProvider, AgentVisualConfig> = {
     subtextClass: 'text-sky-700 dark:text-sky-300',
     buttonClass: 'bg-sky-600 hover:bg-sky-700 active:bg-sky-800',
   },
+  hermes: {
+    name: 'Hermes',
+    description: 'Nous Research Hermes Agent',
+    bgClass: 'bg-emerald-50 dark:bg-emerald-900/20',
+    borderClass: 'border-emerald-200 dark:border-emerald-800',
+    textClass: 'text-emerald-950 dark:text-emerald-100',
+    subtextClass: 'text-emerald-700 dark:text-emerald-300',
+    buttonClass: 'bg-emerald-700 hover:bg-emerald-800 active:bg-emerald-900',
+  },
 };
 
 type SubscriptionOverrideNoticeProps = {

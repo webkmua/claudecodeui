@@ -445,6 +445,18 @@ export const api = {
       get(`/api/providers/${encodeURIComponent(provider)}/skills${query({ workspacePath })}`),
     saveSkills: (provider: string, payload: unknown) =>
       post(`/api/providers/${provider}/skills`, payload),
+    searchSkillsRegistry: (provider: string, { query: q, limit }: { query: string; limit?: number }) =>
+      get(`/api/providers/${encodeURIComponent(provider)}/skills/registry/search${query({ query: q, limit })}`),
+    installRegistrySkill: (provider: string, payload: unknown) =>
+      post(`/api/providers/${encodeURIComponent(provider)}/skills/registry/install`, payload),
+    checkRegistrySkills: (provider: string) =>
+      post(`/api/providers/${encodeURIComponent(provider)}/skills/registry/check`),
+    updateRegistrySkills: (provider: string) =>
+      post(`/api/providers/${encodeURIComponent(provider)}/skills/registry/update`),
+    auditRegistrySkills: (provider: string) =>
+      post(`/api/providers/${encodeURIComponent(provider)}/skills/registry/audit`),
+    uninstallRegistrySkill: (provider: string, name: string) =>
+      del(`/api/providers/${encodeURIComponent(provider)}/skills/registry/${encodeURIComponent(name)}`),
   },
 
   // Slash commands

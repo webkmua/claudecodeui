@@ -44,6 +44,10 @@ export const PROVIDER_FALLBACK_CATALOG = {
     defaultModel: 'gemini-3.7-flash',
     permissionModes: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
   },
+  hermes: {
+    defaultModel: '__hermes_configured_model__',
+    permissionModes: ['default'],
+  },
 };
 
 export type ProviderCatalogId = keyof typeof PROVIDER_FALLBACK_CATALOG;

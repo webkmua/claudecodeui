@@ -7,6 +7,7 @@ const ALL_PROVIDER_IDS: readonly LLMProvider[] = [
   'opencode',
   'zcode',
   'antigravity',
+  'hermes',
 ];
 
 const KNOWN_PROVIDER_IDS = new Set<string>(ALL_PROVIDER_IDS);

@@ -113,4 +113,13 @@ export const PROVIDER_CATALOG = {
     supportsAbort: true,
     supportsEffort: true,
   },
+  hermes: {
+    permissionModes: ['default'],
+    defaultPermissionMode: 'default',
+    defaultModel: '__hermes_configured_model__',
+    supportsImages: true,
+    supportsFiles: true,
+    supportsAbort: true,
+    supportsEffort: false,
+  },
 } as const satisfies Readonly<Record<LLMProvider, ProviderCatalogEntry>>;

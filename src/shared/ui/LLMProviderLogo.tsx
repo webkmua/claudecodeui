@@ -3,6 +3,7 @@ import AntigravityLogo from '@/shared/ui/AntigravityLogo';
 import ClaudeLogo from '@/shared/ui/ClaudeLogo';
 import CodexLogo from '@/shared/ui/CodexLogo';
 import CursorLogo from '@/shared/ui/CursorLogo';
+import HermesLogo from '@/shared/ui/HermesLogo';
 import OpenCodeLogo from '@/shared/ui/OpenCodeLogo';
 import ZCodeLogo from '@/shared/ui/ZCodeLogo';
 
@@ -34,6 +35,10 @@ export function LLMProviderLogo({
 
   if (provider === 'antigravity') {
     return <AntigravityLogo className={className} />;
+  }
+
+  if (provider === 'hermes') {
+    return <HermesLogo className={className} />;
   }
 
   return <ClaudeLogo className={className} />;

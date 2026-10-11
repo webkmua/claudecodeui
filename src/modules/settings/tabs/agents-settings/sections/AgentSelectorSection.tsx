@@ -15,6 +15,7 @@ const AGENT_NAMES: Record<AgentProvider, string> = {
   opencode: 'OpenCode',
   zcode: 'ZCode',
   antigravity: 'Antigravity',
+  hermes: 'Hermes Agent',
 };
 
 /** Rendered by AgentsSettingsTab to pick which agent provider the tab is configuring. */

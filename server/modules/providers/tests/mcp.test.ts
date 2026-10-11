@@ -313,7 +313,7 @@ test('providerMcpService global adder writes to all providers and rejects unsupp
       workspacePath,
     });
 
-    assert.equal(globalResult.length, 6);
+    assert.equal(globalResult.length, 7);
     assert.ok(globalResult.every((entry) => entry.created === true));
 
     const claudeProject = await readJson(path.join(workspacePath, '.mcp.json'));
@@ -324,6 +324,11 @@ test('providerMcpService global adder writes to all providers and rejects unsupp
 
     const opencodeProject = await readJson(path.join(workspacePath, 'opencode.json'));
     assert.ok((opencodeProject.mcp as Record<string, unknown>)['global-http']);
+
+    const hermesProject = await fs.readFile(path.join(workspacePath, '.hermes', 'config.yaml'), 'utf8');
+    assert.match(hermesProject, /^mcp_servers:\n/m);
+    assert.match(hermesProject, /^\s+global-http:\n/m);
+    assert.match(hermesProject, /^\s+url: "https:\/\/global\.example\.com\/mcp"\n/m);
 
     const cursorProject = await readJson(path.join(workspacePath, '.cursor', 'mcp.json'));
     assert.ok((cursorProject.mcpServers as Record<string, unknown>)['global-http']);
@@ -363,7 +368,7 @@ test('providerMcpService blocks directory traversal on project scope writes acro
     const maliciousPaths = ['/etc', path.join(workspacePath, '..', 'outside')];
 
     // For each provider, assert that attempting to write outside the workspace root is rejected
-    const providers = ['claude', 'codex', 'cursor', 'opencode', 'zcode', 'antigravity'] as const;
+    const providers = ['claude', 'codex', 'cursor', 'opencode', 'zcode', 'antigravity', 'hermes'] as const;
 
     for (const provider of providers) {
       // Create symlink pointing outside workspace

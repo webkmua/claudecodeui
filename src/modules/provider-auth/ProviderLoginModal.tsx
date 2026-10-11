@@ -27,6 +27,7 @@ type ProviderLoginModalProps = {
   provider?: LLMProvider;
   onComplete?: (exitCode: number) => void;
   customCommand?: string;
+  customTitle?: string;
   isAuthenticated?: boolean;
 };
 
@@ -67,6 +68,10 @@ const getProviderCommand = ({
     return 'agy';
   }
 
+  if (provider === 'hermes') {
+    return 'hermes model';
+  }
+
   return 'claude --dangerously-skip-permissions /login';
 };
 
@@ -77,6 +82,7 @@ const getProviderTitle = (provider: LLMProvider) => {
   if (provider === 'opencode') return 'OpenCode CLI Login';
   if (provider === 'zcode') return 'ZCode CLI Login';
   if (provider === 'antigravity') return 'Antigravity CLI Login';
+  if (provider === 'hermes') return 'Hermes Agent Setup';
   return 'Claude CLI Login';
 };
 
@@ -87,6 +93,7 @@ export default function ProviderLoginModal({
   provider = 'claude',
   onComplete,
   customCommand,
+  customTitle,
   isAuthenticated = false,
 }: ProviderLoginModalProps) {
   const { t } = useTranslation();
@@ -95,7 +102,7 @@ export default function ProviderLoginModal({
   }
 
   const command = getProviderCommand({ provider, customCommand, isAuthenticated });
-  const title = getProviderTitle(provider);
+  const title = customTitle || getProviderTitle(provider);
 
   const handleComplete = (exitCode: number) => {
     onComplete?.(exitCode);
@@ -119,8 +126,14 @@ export default function ProviderLoginModal({
           </button>
         </div>
 
-        <div className="flex-1 overflow-hidden">
-          <StandaloneShell project={DEFAULT_PROJECT_FOR_EMPTY_SHELL} command={command} onComplete={handleComplete} minimal={true} />
+        <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+          <StandaloneShell
+            project={DEFAULT_PROJECT_FOR_EMPTY_SHELL}
+            command={command}
+            onComplete={handleComplete}
+            minimal={true}
+            className="h-full flex-1"
+          />
         </div>
       </div>
     </div>

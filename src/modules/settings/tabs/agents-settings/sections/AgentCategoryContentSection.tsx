@@ -2,6 +2,7 @@ import type { AgentCategory, AgentContextByProvider, AgentProvider, AgentSetting
 import { McpServers } from '@/modules/mcp';
 import { ProviderSkills } from '@/modules/skills';
 import AccountContent from '@/modules/settings/tabs/agents-settings/sections/content/AccountContent';
+import GatewayContent from '@/modules/settings/tabs/agents-settings/sections/content/GatewayContent';
 import PermissionsContent from '@/modules/settings/tabs/agents-settings/sections/content/PermissionsContent';
 
 type AgentCategoryContentSectionProps = {
@@ -131,6 +132,12 @@ export default function AgentCategoryContentSection({
             fullPath: project.fullPath,
             path: project.path,
           }))}
+        />
+      )}
+
+      {selectedCategory === 'gateway' && selectedAgent === 'hermes' && (
+        <GatewayContent
+          onOpenSetup={(cmd, title) => agentContextById.hermes.onLogin(cmd, title)}
         />
       )}
     </div>

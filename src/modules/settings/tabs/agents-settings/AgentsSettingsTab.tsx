@@ -10,7 +10,7 @@ type ProviderAuthStatusByProvider = Record<AgentProvider, ProviderAuthStatus>;
 
 type AgentsSettingsTabProps = {
   providerAuthStatus: ProviderAuthStatusByProvider;
-  onProviderLogin: (provider: AgentProvider) => void;
+  onProviderLogin: (provider: AgentProvider, customCommand?: string, customTitle?: string) => void;
   claudePermissions: ClaudePermissionsState;
   onClaudePermissionsChange: (value: ClaudePermissionsState) => void;
   cursorPermissions: CursorPermissionsState;
@@ -42,16 +42,19 @@ export default function AgentsSettingsTab({
 }: AgentsSettingsTabProps) {
   const [selectedAgent, setSelectedAgent] = useState<AgentProvider>(DEFAULT_ENABLED_PROVIDER);
   const [selectedCategory, setSelectedCategory] = useState<AgentCategory>('account');
-  const visibleCategories = useMemo<AgentCategory[]>(() => (
-    selectedAgent === 'opencode'
+  const visibleCategories = useMemo<AgentCategory[]>(() => {
+    if (selectedAgent === 'hermes') {
+      return ['account', 'gateway', 'mcp', 'skills'];
+    }
+    return selectedAgent === 'opencode'
       ? ['account', 'permissions', 'mcp']
-      : ['account', 'permissions', 'mcp', 'skills']
-  ), [selectedAgent]);
+      : ['account', 'permissions', 'mcp', 'skills'];
+  }, [selectedAgent]);
 
   const allAgents: AgentProvider[] = [...ENABLED_PROVIDER_ORDER];
 
   const visibleAgents = useMemo<AgentProvider[]>(() => {
-    return allAgents.filter((agent) => providerAuthStatus[agent].installed);
+    return allAgents.filter((agent) => providerAuthStatus[agent]?.installed);
   }, [providerAuthStatus]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const agentContextById = useMemo<AgentContextByProvider>(() => ({
@@ -79,6 +82,10 @@ export default function AgentsSettingsTab({
       authStatus: providerAuthStatus.antigravity,
       onLogin: () => onProviderLogin('antigravity'),
     },
+    hermes: {
+      authStatus: providerAuthStatus.hermes,
+      onLogin: (customCommand?: string, customTitle?: string) => onProviderLogin('hermes', customCommand, customTitle),
+    },
   }), [
     onProviderLogin,
     providerAuthStatus.claude,
@@ -87,6 +94,7 @@ export default function AgentsSettingsTab({
     providerAuthStatus.opencode,
     providerAuthStatus.zcode,
     providerAuthStatus.antigravity,
+    providerAuthStatus.hermes,
   ]);
 
   useEffect(() => {

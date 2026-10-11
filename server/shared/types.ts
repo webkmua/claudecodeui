@@ -498,6 +498,32 @@ export type ProviderSkillRemoveInput = {
   directoryName: string;
 };
 
+export type ProviderSkillRegistrySearchOptions = {
+  source?: string;
+  limit?: number;
+};
+
+export type ProviderSkillRegistrySearchResult = {
+  name: string;
+  identifier: string;
+  source?: string;
+  trustLevel?: string;
+  description?: string;
+};
+
+export type ProviderSkillRegistryInstallInput = {
+  identifier: string;
+  category?: string;
+  name?: string;
+  force?: boolean;
+};
+
+export type ProviderSkillRegistryActionResult = {
+  ok: boolean;
+  stdout: string;
+  stderr: string;
+};
+
 /**
  * Normalized skill record returned by provider skill adapters.
  *
