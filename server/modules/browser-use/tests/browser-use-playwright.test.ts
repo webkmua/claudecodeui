@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { resolveBrowserPlaywright } from '@/modules/browser-use/browser-use-playwright.js';
+import { hasExistingChromium, resolveBrowserPlaywright } from '@/modules/browser-use/browser-use-playwright.js';
 
 async function writePlaywrightFixture(root: string, source: string): Promise<void> {
   const packageDirectory = path.join(root, 'node_modules', 'playwright');
@@ -93,6 +93,42 @@ test('broken managed runtime is not hidden by a development Playwright fallback'
 
     assert.equal(playwright, null);
     assert.equal(usedFallback, false);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test('existing exact Chromium executable is detected', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'browser-use-chromium-existing-'));
+
+  try {
+    const executablePath = path.join(temporaryRoot, 'chromium');
+    await writeFile(executablePath, '');
+
+    assert.equal(hasExistingChromium({
+      chromium: { executablePath: () => executablePath },
+    }), true);
+  } finally {
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test('missing or invalid Chromium executable falls back to installation', async () => {
+  const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), 'browser-use-chromium-missing-'));
+
+  try {
+    const executablePath = path.join(temporaryRoot, 'chromium');
+
+    assert.equal(hasExistingChromium(null), false);
+    assert.equal(hasExistingChromium({ chromium: {} }), false);
+    assert.equal(hasExistingChromium({
+      chromium: { executablePath: () => executablePath },
+    }), false);
+    assert.equal(hasExistingChromium({
+      chromium: { executablePath: () => {
+        throw new Error('unsupported registry');
+      } },
+    }), false);
   } finally {
     await rm(temporaryRoot, { recursive: true, force: true });
   }

@@ -35,3 +35,16 @@ export function resolveBrowserPlaywright({
     return null;
   }
 }
+
+export function hasExistingChromium(playwright: any | null): boolean {
+  if (!playwright?.chromium?.executablePath) {
+    return false;
+  }
+
+  try {
+    const executablePath = playwright.chromium.executablePath();
+    return Boolean(executablePath && fs.existsSync(executablePath));
+  } catch {
+    return false;
+  }
+}

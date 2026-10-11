@@ -11,7 +11,7 @@ import { providerMcpService } from '@/modules/providers/index.js';
 import { getModuleDirectory } from '@/shared/utils.js';
 
 import { getBrowserUseRuntime } from './browser-use-runtime.js';
-import { resolveBrowserPlaywright } from './browser-use-playwright.js';
+import { hasExistingChromium, resolveBrowserPlaywright } from './browser-use-playwright.js';
 
 const __dirname = getModuleDirectory(import.meta.url);
 const MAX_SESSIONS_PER_OWNER = Number.parseInt(process.env.CLOUDCLI_BROWSER_USE_MAX_SESSIONS_PER_OWNER || '3', 10);
@@ -317,6 +317,12 @@ async function installRuntime(): Promise<{ success: boolean; message: string }> 
       // it self-describing; nothing ever reconciles this directory.
       await runCommand(npmCommand, ['install', 'playwright'], installDir);
 
+      const playwright = resolveBrowserPlaywright({ runtimeInstallDir: installDir });
+      if (hasExistingChromium(playwright)) {
+        lastInstallMessage = 'Using existing Chromium runtime.';
+        return { success: true, message: lastInstallMessage };
+      }
+
       if (process.platform === 'linux') {
         lastInstallMessage = 'Installing Chromium system dependencies...';
         await runCommand(npmCommand, ['exec', '--', 'playwright', 'install-deps', 'chromium'], installDir);
@@ -575,6 +581,7 @@ export const browserUseService = {
     let page: any;
     const launchOptions = {
       headless: true,
+      chromiumSandbox: true,
       args: ['--disable-dev-shm-usage'],
     };
     const contextOptions = {
