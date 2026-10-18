@@ -468,6 +468,8 @@ export class AntigravityRuntimeProvider implements IProviderRuntime {
        */
       let touchWatchdog = (): void => {};
 
+      let agyProcess: ChildProcess;
+
       const processLine = (line: string) => {
         if (!line || !line.trim()) return;
 
@@ -500,6 +502,7 @@ export class AntigravityRuntimeProvider implements IProviderRuntime {
             const convId = readOptionalString(rawRecord.conversation_id);
             if (convId && !capturedSessionId) {
               capturedSessionId = convId;
+              activeProcesses.set(capturedSessionId, agyProcess);
               if (sessionTasks) {
                 activeSessionBackgroundTasks.set(capturedSessionId, sessionTasks);
               }
@@ -691,13 +694,19 @@ export class AntigravityRuntimeProvider implements IProviderRuntime {
         }
       };
 
-      const agyProcess = crossSpawn(enginePath, args, {
+      agyProcess = crossSpawn(enginePath, args, {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env },
       });
 
       activeProcesses.set(processKey, agyProcess);
+      if (sessionId && sessionId !== processKey) {
+        activeProcesses.set(sessionId, agyProcess);
+      }
+      if (capturedSessionId && capturedSessionId !== processKey) {
+        activeProcesses.set(capturedSessionId, agyProcess);
+      }
 
       let stdinClosed = false;
       closeStdinTurn = () => {
@@ -779,7 +788,15 @@ export class AntigravityRuntimeProvider implements IProviderRuntime {
 
       agyProcess.on('close', (code: number | null) => {
         clearWatchdog();
-        activeProcesses.delete(processKey);
+        if (activeProcesses.get(processKey) === agyProcess) {
+          activeProcesses.delete(processKey);
+        }
+        if (sessionId && activeProcesses.get(sessionId) === agyProcess) {
+          activeProcesses.delete(sessionId);
+        }
+        if (capturedSessionId && activeProcesses.get(capturedSessionId) === agyProcess) {
+          activeProcesses.delete(capturedSessionId);
+        }
 
         if (stdoutBuffer.trim()) {
           processLine(stdoutBuffer.trim());
@@ -814,7 +831,11 @@ export class AntigravityRuntimeProvider implements IProviderRuntime {
         // A SIGTERM from abort() closes with code null after the chat gateway
         // already completed the run: resolve quietly and notify 'aborted'
         // instead of reporting a failure or a completion.
-        const wasAborted = abortedProcessKeys.delete(processKey);
+        const wasAborted = Boolean(
+          abortedProcessKeys.delete(processKey)
+          || (sessionId && abortedProcessKeys.delete(sessionId))
+          || (capturedSessionId && abortedProcessKeys.delete(capturedSessionId))
+        );
         if (wasAborted) {
           notifyRunStopped({
             userId: writer.userId != null ? String(writer.userId) : null,
@@ -854,7 +875,15 @@ export class AntigravityRuntimeProvider implements IProviderRuntime {
 
       agyProcess.on('error', (err: Error) => {
         clearWatchdog();
-        activeProcesses.delete(processKey);
+        if (activeProcesses.get(processKey) === agyProcess) {
+          activeProcesses.delete(processKey);
+        }
+        if (sessionId && activeProcesses.get(sessionId) === agyProcess) {
+          activeProcesses.delete(sessionId);
+        }
+        if (capturedSessionId && activeProcesses.get(capturedSessionId) === agyProcess) {
+          activeProcesses.delete(capturedSessionId);
+        }
         console.error('[Antigravity CLI error]:', err);
 
         writer.send(createNormalizedMessage({
@@ -890,8 +919,13 @@ export class AntigravityRuntimeProvider implements IProviderRuntime {
     if (process) {
       console.info(`[AntigravityRuntime] Aborting session: ${sessionId}`);
       abortedProcessKeys.add(sessionId);
+      for (const [key, proc] of activeProcesses.entries()) {
+        if (proc === process) {
+          abortedProcessKeys.add(key);
+          activeProcesses.delete(key);
+        }
+      }
       process.kill('SIGTERM');
-      activeProcesses.delete(sessionId);
       return true;
     }
     return false;

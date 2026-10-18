@@ -335,6 +335,37 @@ test('abort resolves the run quietly as aborted', async () => {
   }
 });
 
+test('a closing run does not remove a newer active process for the same session id', async () => {
+  const runtime = new AntigravityRuntimeProvider();
+  await fs.rm(argsFilePath, { force: true });
+
+  const { writer: writer1 } = createWriter();
+  const { writer: writer2 } = createWriter();
+
+  // Run 1 will complete and close its process
+  const run1Promise = runtime.run('turn 1', { sessionId: 'sess-race' }, writer1, context);
+  await waitForArgsFile();
+  await fs.rm(argsFilePath, { force: true });
+
+  // Run 2 starts while run 1 is completing, and stays asleep
+  process.env.AGY_STUB_MODE = 'sleep';
+  try {
+    const run2Promise = runtime.run('turn 2', { sessionId: 'sess-race' }, writer2, context);
+    await waitForArgsFile();
+
+    // Wait for run 1 to finish and fire its 'close' event
+    await run1Promise;
+
+    // Run 1's close event must NOT have deleted run 2 from activeProcesses
+    assert.equal(await runtime.abort('sess-race'), true);
+
+    const result2 = await run2Promise;
+    assert.deepEqual(result2, { sessionId: 'sess-race', success: true, aborted: true });
+  } finally {
+    delete process.env.AGY_STUB_MODE;
+  }
+});
+
 test('runtime resolves model selection and reasoning effort into agy arguments', async () => {
   const runtime = new AntigravityRuntimeProvider();
 
