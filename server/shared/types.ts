@@ -222,6 +222,7 @@ export type ProviderSessionFileSynchronizationDelta = {
 export type ProviderModelOption = {
   value: string;
   label: string;
+  group?: string;
   description?: string;
   /** Stable SQLite row id used only by model-management actions. */
   recordId?: number;
@@ -1148,6 +1149,12 @@ export type FileTreeServiceDependencies = {
    * every path outside these roots is rejected with `PATH_NOT_ALLOWED`.
    */
   externalReadOnlyRoots: string[];
+  /**
+   * Optional resolver that returns the absolute worktree root directories for
+   * a given project root. Used to allow dynamic read-only access to files inside
+   * linked Git worktrees without relaxing project write boundaries.
+   */
+  resolveWorktreeRoots?: (projectRoot: string) => Promise<string[]>;
 };
 
 /**
@@ -1166,15 +1173,17 @@ export type FileTreeServices = {
   readTextFile(projectId: string, filePath: string): Promise<{ content: string; path: string }>;
   /**
    * Reads a text file outside any project root. The path must resolve inside
-   * one of the injected `externalReadOnlyRoots`; there is deliberately no
-   * write counterpart, so external files can never be modified through the API.
+   * one of the injected `externalReadOnlyRoots`, or within a linked worktree of
+   * `projectId` when provided; there is deliberately no write counterpart, so
+   * external files can never be modified through the API.
    */
-  readExternalTextFile(filePath: string): Promise<{ content: string; path: string }>;
+  readExternalTextFile(filePath: string, projectId?: string): Promise<{ content: string; path: string }>;
   /**
    * Opens a stream for a media or binary file outside any project root. The path
-   * must resolve inside one of the injected `externalReadOnlyRoots`.
+   * must resolve inside one of the injected `externalReadOnlyRoots`, or within a
+   * linked worktree of `projectId` when provided.
    */
-  openExternalFile(filePath: string): Promise<{ contentType: string; stream: Readable }>;
+  openExternalFile(filePath: string, projectId?: string): Promise<{ contentType: string; stream: Readable }>;
   openFile(projectId: string, filePath: string): Promise<{ contentType: string; stream: Readable }>;
   saveTextFile(projectId: string, filePath: string, content: string): Promise<{
     success: true;
@@ -1410,4 +1419,179 @@ export type RunOutcome = {
   eventCount: number;
   /** The session's sequence watermark when the run ended. */
   lastSeq: number;
+};
+
+// ---------------------------
+//----------------- ASYNC TASK CONTINUATION TYPES ------------
+
+/**
+ * Execution status of an asynchronous local task.
+ */
+export type AsyncTaskExecutionStatus =
+  | 'registered'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+/**
+ * Delivery lifecycle status for a task continuation notification event.
+ */
+export type TaskContinuationEventStatus =
+  | 'pending'
+  | 'claimed'
+  | 'sending'
+  | 'accepted'
+  | 'delivered'
+  | 'reply_failed'
+  | 'uncertain'
+  | 'needs_review'
+  | 'cancelled';
+
+/**
+ * Database record representing an asynchronous task.
+ */
+export type AsyncTaskRecord = {
+  task_id: string;
+  user_id: number;
+  session_id: string;
+  run_id: string | null;
+  provider_thread_id: string | null;
+  session_project_path: string | null;
+  working_directory: string | null;
+  sandbox_policy_type: 'workspaceWrite' | 'dangerFullAccess' | null;
+  network_access: number | null;
+  approval_policy: 'never' | 'on-request' | null;
+  title: string;
+  command: string | null;
+  registration_key: string | null;
+  auto_notify: number;
+  notification_cancelled_at: string | null;
+  notification_cancelled_reason: string | null;
+  status: AsyncTaskExecutionStatus;
+  exit_code: number | null;
+  result_digest: string | null;
+  result_path: string | null;
+  result_summary: string | null;
+  result_json: string | null;
+  last_error: string | null;
+  token_hash: string;
+  token_expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/**
+ * Database record representing a continuation outbox event.
+ */
+export type TaskContinuationEventRecord = {
+  event_id: string;
+  task_id: string;
+  session_id: string;
+  status: TaskContinuationEventStatus;
+  attempts: number;
+  lease_owner: string | null;
+  lease_expires_at: string | null;
+  lease_expires_at_ms: number | null;
+  last_attempt_at: string | null;
+  engine_turn_id: string | null;
+  host_run_id: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+/** Trusted per-run permissions and identity used by the host task bridge. */
+export type TaskRunCapabilityContext = {
+  userId: number;
+  sessionId: string;
+  runId: string;
+  providerThreadId: string | null;
+  sessionProjectPath: string;
+  cwd: string;
+  sandboxPolicy: {
+    type: 'workspaceWrite' | 'dangerFullAccess';
+    networkAccess: boolean;
+  };
+  approvalPolicy: 'never' | 'on-request';
+};
+
+/** Authenticated ownership boundary for task management requests. */
+export type TaskAccessScope = {
+  userId: number;
+  sessionId?: string;
+};
+
+/** Result of checking the task's original owner, workspace, provider and runtime state. */
+export type TaskContinuationTargetCheck =
+  | { outcome: 'ready' }
+  | { outcome: 'busy'; reason: string }
+  | { outcome: 'invalid'; reason: string };
+
+/**
+ * History is evidence, not a delivery guess. `found: false` means the checker
+ * cannot prove a result, so callers must not blindly resend. `inProgress` keeps
+ * an accepted turn under observation; `paused` means the original target is archived.
+ */
+export type TaskContinuationHistoryCheck = {
+  found: boolean;
+  engineTurnId?: string | null;
+  status?: 'completed' | 'failed' | 'interrupted' | 'inProgress' | 'paused';
+};
+
+export type TaskHistoryChecker = (eventId: string) => Promise<TaskContinuationHistoryCheck>;
+
+/**
+ * Input for registering a new async task.
+ */
+export type RegisterAsyncTaskInput = {
+  taskId: string;
+  userId: number;
+  sessionId: string;
+  runId?: string | null;
+  providerThreadId?: string | null;
+  sessionProjectPath?: string | null;
+  workingDirectory?: string | null;
+  sandboxPolicyType?: 'workspaceWrite' | 'dangerFullAccess' | null;
+  networkAccess?: boolean | null;
+  approvalPolicy?: 'never' | 'on-request' | null;
+  title: string;
+  command?: string | null;
+  registrationKey?: string | null;
+  autoNotify?: boolean;
+  tokenHash: string;
+  tokenExpiresAt?: string | null;
+};
+
+/**
+ * Input for completing an async task and writing to transactional outbox.
+ */
+export type RecordTaskCompletionInput = {
+  taskId: string;
+  status: 'completed' | 'failed' | 'cancelled';
+  exitCode?: number | null;
+  resultDigest: string;
+  resultPath?: string | null;
+  resultSummary?: string | null;
+  resultJson?: string | null;
+};
+
+/**
+ * Result of completing a task.
+ */
+export type RecordTaskCompletionResult = {
+  taskId: string;
+  eventId: string | null;
+  status: AsyncTaskExecutionStatus;
+  isDuplicate: boolean;
+};
+
+/**
+ * Parameters for claiming a pending continuation event.
+ */
+export type ClaimPendingEventInput = {
+  leaseOwner: string;
+  leaseDurationMs: number;
+  /** Injected by deterministic lease tests; production callers should omit it. */
+  nowMs?: number;
 };

@@ -13,6 +13,7 @@
  */
 
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import * as fsSync from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -235,4 +236,53 @@ export async function readDecryptedZCodeCredentials(
       error: errorMessage,
     };
   }
+}
+
+/** Reads one selected credential, rejecting missing or undecryptable values. */
+function readDecryptedCredential(
+  select: (rawMap: Record<string, unknown>) => string | null,
+  storageDir = getZCodeStorageDir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const credPath = path.join(storageDir, 'v2', 'credentials.json');
+  try {
+    const content = fsSync.readFileSync(credPath, 'utf8');
+    const rawMap = readObjectRecord(JSON.parse(content));
+    if (!rawMap) return null;
+    const rawToken = select(rawMap);
+    if (!rawToken) {
+      return null;
+    }
+    if (rawToken.startsWith(CIPHER_PREFIX)) {
+      try {
+        return decryptZCodeCredentialValue(rawToken, env);
+      } catch {
+        return null;
+      }
+    }
+    return rawToken;
+  } catch {
+    return null;
+  }
+}
+
+/** Used by the account model catalog, send builder, and runtime header bridge. */
+export function readDecryptedZCodeIndividualPlanApiKey(
+  storageDir = getZCodeStorageDir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  return readDecryptedCredential((rawMap) => {
+    const keys = Object.keys(rawMap).filter((key) =>
+      /^account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:[^:]+:api-key$/.test(key));
+    // Never guess between accounts: that could charge the wrong subscription.
+    return keys.length === 1 ? readOptionalString(rawMap[keys[0]]) ?? null : null;
+  }, storageDir, env);
+}
+
+/** Used by trial-plan model discovery, send auth, and account activation. */
+export function readDecryptedZCodeJwtToken(
+  storageDir = getZCodeStorageDir(),
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  return readDecryptedCredential((rawMap) => readOptionalString(rawMap.zcodejwttoken) ?? null, storageDir, env);
 }

@@ -103,7 +103,9 @@ const BASELINE: Record<string, Omit<ProviderCapabilities, 'provider'>> = {
     supportsImages: true,
     supportsFiles: true,
     supportsAbort: true,
-    supportsPermissionRequests: false,
+    // The runtime mounts the permissions facet: permission asks and question
+    // forms surface as cards answered through the service API.
+    supportsPermissionRequests: true,
     supportsTokenUsage: true,
     supportsQuota: false,
     supportsQuotaReset: false,
@@ -189,9 +191,8 @@ test('the catalog covers exactly the registered providers with valid mode tables
   }
 });
 
-test('the catalog default model equals each provider models definition DEFAULT', async () => {
+test('the catalog fallback default matches each static provider models definition DEFAULT', async () => {
   const { CLAUDE_PREDEFINED_MODELS } = await import('../list/claude/claude-models.provider.js');
-  const { CODEX_PREDEFINED_MODELS } = await import('../list/codex/codex-models.provider.js');
   const { CURSOR_PREDEFINED_MODELS } = await import('../list/cursor/cursor-models.provider.js');
   const { OPENCODE_PREDEFINED_MODELS } = await import('../list/opencode/opencode-models.provider.js');
   const { ZCODE_BUILTIN_MODELS } = await import('../list/zcode/zcode-models.provider.js');
@@ -200,7 +201,6 @@ test('the catalog default model equals each provider models definition DEFAULT',
   const defaults = {
     claude: CLAUDE_PREDEFINED_MODELS.DEFAULT,
     cursor: CURSOR_PREDEFINED_MODELS.DEFAULT,
-    codex: CODEX_PREDEFINED_MODELS.DEFAULT,
     opencode: OPENCODE_PREDEFINED_MODELS.DEFAULT,
     zcode: ZCODE_BUILTIN_MODELS.DEFAULT,
     antigravity: ANTIGRAVITY_BUILTIN_MODELS.DEFAULT,

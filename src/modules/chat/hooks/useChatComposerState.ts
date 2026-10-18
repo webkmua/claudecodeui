@@ -12,7 +12,9 @@ import type {
 import { useDropzone } from 'react-dropzone';
 
 import { authenticatedFetch } from '@/shared/api';
+import { createClientRequestId } from '@/shared/utils';
 import type { MarkSessionProcessing, SessionActivityMap } from '@/shared/types';
+import { uploadAttachmentFiles } from '@/modules/chat/utils/attachmentUpload';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   clearQueuedMessage,
@@ -172,13 +174,6 @@ export type CommandModalPayload = {
 class ComposerSubmitError extends Error {}
 
 /**
- * One id per submit attempt, carried with the message so the backend can
- * recognise a repeat of the same attempt. The frontend latch already blocks a
- * second click in this composer; this covers what it cannot see — a retried
- * request, or another tab replaying the same submit — which would otherwise
- * open a second conversation for one message.
- */
-/**
  * How much of the first message the session gateway is given.
  *
  * The backend only reads it to title the session from its first few words, so
@@ -187,14 +182,6 @@ class ComposerSubmitError extends Error {}
  * could even start.
  */
 const SESSION_TITLE_SOURCE_CHARS = 200;
-
-const createClientRequestId = (): string => {
-  // Non-secure contexts (plain-HTTP LAN access) have no crypto.randomUUID.
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `submit-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-};
 
 const createFakeSubmitEvent = () => {
   return { preventDefault: () => undefined } as unknown as FormEvent<HTMLFormElement>;
@@ -206,34 +193,6 @@ const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 const isImageAttachment = (attachment: ChatAttachment) => {
   if (attachment.mimeType?.startsWith('image/')) return true;
   return /\.(gif|jpe?g|png|svg|webp)$/i.test(attachment.path || attachment.name || '');
-};
-
-const uploadAttachmentFiles = async (files: File[]): Promise<unknown[]> => {
-  if (files.length === 0) {
-    return [];
-  }
-
-  const formData = new FormData();
-  files.forEach((file) => {
-    formData.append('files', file);
-  });
-
-  const response = await authenticatedFetch('/api/assets/files', {
-    method: 'POST',
-    headers: {},
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const body = await response.json().catch(() => null);
-    throw new Error(body?.error || 'Failed to upload files');
-  }
-
-  const result = await response.json();
-  if (!Array.isArray(result.attachments) || result.attachments.length !== files.length) {
-    throw new Error('File upload returned an incomplete result');
-  }
-  return result.attachments;
 };
 
 export type QueuedDraft = {
@@ -1365,6 +1324,19 @@ export function useChatComposerState({
     setIsTextareaExpanded(false);
   }, [resetCommandMenuState, updateInput]);
 
+  // The task strip targets background work even while a foreground turn is
+  // responding. Leave cards and queued drafts intact until the server settles it.
+  const handleAbortBackgroundTasks = useCallback(() => {
+    const targetSessionId = selectedSession?.id || currentSessionId || null;
+    if (!targetSessionId) {
+      console.warn('Background stop requested but no session ID is available.');
+      return;
+    }
+    for (const taskId of new Set(backgroundTasks.flatMap((task) => task.taskId ? [task.taskId] : []))) {
+      sendMessage({ type: 'chat.stop-task', sessionId: targetSessionId, taskId });
+    }
+  }, [backgroundTasks, currentSessionId, selectedSession?.id, sendMessage]);
+
   const handleAbortSession = useCallback(() => {
     if (!canAbortSession) {
       return;
@@ -1376,13 +1348,20 @@ export function useChatComposerState({
       return;
     }
 
+    const activity = processingSessions?.get(targetSessionId);
+    if (backgroundTasks.length > 0 && backgroundTasks.every((task) => task.taskId)
+      && !(activity && !activity.background)) {
+      handleAbortBackgroundTasks();
+      return;
+    }
+
     // The backend resolves the provider from the session row, so no provider
     // field is needed here.
     sendMessage({
       type: 'chat.abort',
       sessionId: targetSessionId,
     });
-  }, [canAbortSession, currentSessionId, selectedSession?.id, sendMessage]);
+  }, [backgroundTasks, canAbortSession, currentSessionId, handleAbortBackgroundTasks, processingSessions, selectedSession?.id, sendMessage]);
 
   const handleGrantToolPermission = useCallback(
     (suggestion: { entry: string; toolName: string }) => {
@@ -1495,6 +1474,7 @@ export function useChatComposerState({
     syncInputOverlayScroll,
     handleClearInput,
     handleAbortSession,
+    handleAbortBackgroundTasks,
     handlePermissionDecision,
     handleGrantToolPermission,
     handleInputFocusChange,

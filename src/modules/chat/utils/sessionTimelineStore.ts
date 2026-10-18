@@ -138,6 +138,10 @@ export type SessionSlot = {
   offset: number;
   tokenUsage: unknown;
   backgroundTasks: ActiveBackgroundTask[];
+  /** Reply completion is separate from card removal, so queued input cannot interrupt it. */
+  backgroundWorkPending?: boolean;
+  /** Client clock when the session last entered background waiting; set exactly while it waits. */
+  backgroundWorkSince?: number;
 }
 
 const EMPTY: NormalizedMessage[] = [];
@@ -191,29 +195,56 @@ export type SessionPageFetcher = (
 ) => Promise<SessionHistoryPage>;
 
 /**
+ * Bounded request timeout that also works on WebKit < 16 (e.g. iPadOS 15.4),
+ * where `AbortSignal.timeout` does not exist and calling it throws before the
+ * request is even started. The caller must invoke `dispose()` once the request
+ * settles so the fallback timer does not linger; the native path has no timer
+ * to clean up.
+ */
+export function createRequestTimeoutSignal(ms: number): {
+  signal: AbortSignal;
+  dispose: () => void;
+} {
+  if (typeof AbortSignal.timeout === 'function') {
+    return { signal: AbortSignal.timeout(ms), dispose: () => undefined };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return {
+    signal: controller.signal,
+    dispose: () => clearTimeout(timer),
+  };
+}
+
+/**
  * The default transport: one bounded page from the provider sessions
  * endpoint (the standard `{ success, data }` envelope).
  */
 export const requestSessionHistoryPage: SessionPageFetcher = async (sessionId, options) => {
-  const response = await authenticatedFetch(buildSessionMessagesUrl(sessionId, options), {
-    signal: AbortSignal.timeout(SESSION_HISTORY_REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const timeout = createRequestTimeoutSignal(SESSION_HISTORY_REQUEST_TIMEOUT_MS);
+  try {
+    const response = await authenticatedFetch(buildSessionMessagesUrl(sessionId, options), {
+      signal: timeout.signal,
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
-  const body = await response.json();
-  const data = body?.data ?? body;
-  const messages: NormalizedMessage[] = Array.isArray(data.messages) ? data.messages : [];
+    const body = await response.json();
+    const data = body?.data ?? body;
+    const messages: NormalizedMessage[] = Array.isArray(data.messages) ? data.messages : [];
 
-  return {
-    messages,
-    total: typeof data.total === 'number' ? data.total : messages.length,
-    hasMore: Boolean(data.hasMore),
-    ...(
-      data && typeof data === 'object' && 'tokenUsage' in data
-        ? { tokenUsage: data.tokenUsage }
-        : {}
-    ),
-  };
+    return {
+      messages,
+      total: typeof data.total === 'number' ? data.total : messages.length,
+      hasMore: Boolean(data.hasMore),
+      ...(
+        data && typeof data === 'object' && 'tokenUsage' in data
+          ? { tokenUsage: data.tokenUsage }
+          : {}
+      ),
+    };
+  } finally {
+    timeout.dispose();
+  }
 };
 
 type LatestHistoryRefreshResult = {
@@ -932,8 +963,7 @@ export class SessionTimelineStore {
         }
         const ackBgTasks = Array.isArray(msg.backgroundTasks) ? msg.backgroundTasks : undefined;
         if (ackBgTasks) {
-          this.getSlot(sid).backgroundTasks = ackBgTasks;
-          this.notify(sid);
+          this.setBackgroundState(sid, ackBgTasks, msg.backgroundWorkPending);
         }
         return {
           effect: 'chat_subscribed',
@@ -998,8 +1028,7 @@ export class SessionTimelineStore {
       case 'status': {
         const statusBgTasks = Array.isArray(message?.backgroundTasks) ? message.backgroundTasks : undefined;
         if (sid && statusBgTasks) {
-          this.getSlot(sid).backgroundTasks = statusBgTasks;
-          this.notify(sid);
+          this.setBackgroundState(sid, statusBgTasks, message?.backgroundWorkPending);
         }
         return {
           effect: 'status',
@@ -1793,5 +1822,34 @@ export class SessionTimelineStore {
   /** Active background tasks for a session. */
   getBackgroundTasks(sessionId: string): ActiveBackgroundTask[] {
     return this.slots.get(sessionId)?.backgroundTasks ?? [];
+  }
+
+  /** Used by chat's queue and notifications to wait for the background reply as well as execution. */
+  hasPendingBackgroundWork(sessionId: string): boolean {
+    const slot = this.slots.get(sessionId);
+    return Boolean(slot?.backgroundTasks.length || slot?.backgroundWorkPending);
+  }
+
+  /**
+   * Used by the viewed session's activity indicator: the earliest task's start,
+   * or when the reply phase began once the cards are gone. Undefined while idle.
+   */
+  getBackgroundWorkStartedAt(sessionId: string): number | undefined {
+    const slot = this.slots.get(sessionId);
+    if (!slot?.backgroundTasks.length) return slot?.backgroundWorkSince;
+    return Math.min(...slot.backgroundTasks.map((task) => task.startedAt));
+  }
+
+  private setBackgroundState(sid: string, tasks: ActiveBackgroundTask[], pending: unknown): void {
+    const slot = this.getSlot(sid);
+    const wasPending = this.hasPendingBackgroundWork(sid);
+    slot.backgroundTasks = tasks;
+    slot.backgroundWorkPending = typeof pending === 'boolean' ? pending : undefined;
+    if (!this.hasPendingBackgroundWork(sid)) {
+      slot.backgroundWorkSince = undefined;
+    } else if (!wasPending) {
+      slot.backgroundWorkSince = Date.now();
+    }
+    this.notify(sid);
   }
 }

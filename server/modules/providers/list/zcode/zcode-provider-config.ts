@@ -14,12 +14,14 @@
  * @module zcode-provider-config
  */
 
+import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { readObjectRecord, readOptionalString, readTrimmedStringRecord } from '@/shared/utils.js';
 import type { AnyRecord } from '@/shared/types.js';
 
+import { readDecryptedZCodeIndividualPlanApiKey, readDecryptedZCodeJwtToken } from './zcode-credentials.js';
 import { getZCodeStorageDir } from './zcode-data-root.js';
 
 /**
@@ -237,7 +239,7 @@ const BUILTIN_RELATIVE_CANDIDATES = [
   path.join('..', '..', '..', '..', '..', 'config', 'provider', BUILTIN_CONFIG_FILE),
 ];
 
-function findBuiltinConfig(enginePath: string): string | null {
+export function findBuiltinConfig(enginePath: string): string | null {
   const engineDir = path.dirname(path.resolve(enginePath));
   for (const relative of BUILTIN_RELATIVE_CANDIDATES) {
     const candidate = path.resolve(engineDir, relative);
@@ -248,6 +250,58 @@ function findBuiltinConfig(enginePath: string): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Computes the exact revision string expected by ZCode app-server's
+ * `provider/updateAccountConfig` RPC (`zcode-builtin:${revision}:${sha256(path.resolve(configPath))}`).
+ * Returns null if the file cannot be read or is missing a valid revision.
+ */
+export function resolveZCodeBuiltinRevision(builtinConfigPath: string): string | null {
+  try {
+    const raw = fs.readFileSync(builtinConfigPath, 'utf8');
+    const parsed = readObjectRecord(JSON.parse(raw));
+    const revision = parsed?.revision;
+    if (typeof revision !== 'number' && typeof revision !== 'string') return null;
+    const resolvedPath = path.resolve(builtinConfigPath);
+    const hash = crypto.createHash('sha256').update(resolvedPath).digest('hex');
+    return `zcode-builtin:${revision}:${hash}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Builds the `provider/updateAccountConfig` payload for available account plans.
+ *
+ * In app-server mode, the engine starts fail-closed by marking all account
+ * providers as `entitled: false`. A trial JWT or an individual-plan API key
+ * activates the matching provider in the engine's executable registry view.
+ *
+ * Returns null when no eligible credential is stored or the built-in config is unavailable.
+ */
+export function buildZCodeAccountSyncPayload(builtinConfigPath: string): Record<string, unknown> | null {
+  const jwtToken = readDecryptedZCodeJwtToken();
+  const individualApiKey = readDecryptedZCodeIndividualPlanApiKey();
+  if (!jwtToken && !individualApiKey) return null;
+
+  const basedOnZCodeBuiltinRevision = resolveZCodeBuiltinRevision(builtinConfigPath);
+  if (!basedOnZCodeBuiltinRevision) return null;
+
+  const entitledProviderIds = [
+    ...(jwtToken ? ['account:bigmodel-start-plan'] : []),
+    ...(individualApiKey ? ['account:bigmodel-individual-coding-plan'] : []),
+  ];
+  return {
+    revision: '1',
+    basedOnZCodeBuiltinRevision,
+    providers: Object.fromEntries(entitledProviderIds.map((providerId) => [providerId, {
+      access: { type: 'zhipu-account', entitled: true },
+    }])),
+    states: Object.fromEntries(entitledProviderIds.map((providerId) => [providerId, {
+      availability: 'available', entitled: true, current: true,
+    }])),
+  };
 }
 
 /**

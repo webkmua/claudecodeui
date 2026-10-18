@@ -1,6 +1,8 @@
+import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import Database from 'better-sqlite3';
 
@@ -8,15 +10,22 @@ import { sessionsDb } from '@/modules/database/index.js';
 import type { IProviderModels } from '@/shared/interfaces.js';
 import type {
   ProviderCurrentActiveModel,
+  ProviderModelOption,
   ProviderModelsDefinition,
 } from '@/shared/types.js';
 import {
   buildDefaultProviderCurrentActiveModel,
+  readJsonRecord,
   readObjectRecord,
   readOptionalString,
+  stripAnsiSequences,
 } from '@/shared/utils.js';
 
-import { getOpenCodeDatabasePath } from './opencode-data-root.js';
+import {
+  getOpenCodeDatabasePath,
+  resolveOpenCodeSessionTableName,
+} from './opencode-data-root.js';
+import { tryResolveOpenCodeEnginePath } from './opencode-engine-path.js';
 
 /**
  * Curated OpenCode catalog shipped as immutable CloudCLI defaults.
@@ -26,78 +35,22 @@ import { getOpenCodeDatabasePath } from './opencode-data-root.js';
  * OpenCode Go subscription gateway, and the Anthropic and OpenAI providers
  * OpenCode can address directly with the user's own credentials.
  */
+/**
+ * Static anchor catalog for OpenCode.
+ *
+ * The real catalog is the account-scoped list `opencode models` reports at
+ * runtime; these two entries only stand in when that probe is unavailable
+ * (CLI missing, failing, or answering empty) and anchor the shared capability
+ * catalogs' default model. Model ids churn with OpenCode's console lineup, so
+ * this list is deliberately tiny: every entry here is a maintenance liability,
+ * not a feature. The Go anchor additionally carries the effort variants a
+ * dynamic option cannot know. Unknown dynamic ids are synthesized on the fly
+ * by buildOpenCodeModelOption, which reuses an entry's display metadata on
+ * match.
+ */
 export const OPENCODE_PREDEFINED_MODELS: ProviderModelsDefinition = {
   OPTIONS: [
-    { value: 'opencode/gpt-5.6-sol', label: 'GPT 5.6 Sol', description: 'OpenCode Zen' },
     { value: 'opencode/gpt-5.6-terra', label: 'GPT 5.6 Terra', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.6-luna', label: 'GPT 5.6 Luna', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.5', label: 'GPT 5.5', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.5-pro', label: 'GPT 5.5 Pro', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.4', label: 'GPT 5.4', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.4-pro', label: 'GPT 5.4 Pro', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.4-mini', label: 'GPT 5.4 Mini', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.4-nano', label: 'GPT 5.4 Nano', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.3-codex', label: 'GPT 5.3 Codex', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.3-codex-spark', label: 'GPT 5.3 Codex Spark', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.2', label: 'GPT 5.2', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5.1', label: 'GPT 5.1', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5', label: 'GPT 5', description: 'OpenCode Zen' },
-    { value: 'opencode/gpt-5-nano', label: 'GPT 5 Nano', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-fable-5', label: 'Claude Fable 5', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-opus-5', label: 'Claude Opus 5', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-opus-4-8', label: 'Claude Opus 4.8', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-opus-4-7', label: 'Claude Opus 4.7', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-opus-4-6', label: 'Claude Opus 4.6', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-opus-4-5', label: 'Claude Opus 4.5', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-sonnet-5', label: 'Claude Sonnet 5', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-sonnet-4-5', label: 'Claude Sonnet 4.5', description: 'OpenCode Zen' },
-    { value: 'opencode/claude-haiku-4-5', label: 'Claude Haiku 4.5', description: 'OpenCode Zen' },
-    { value: 'opencode/gemini-3.6-flash', label: 'Gemini 3.6 Flash', description: 'OpenCode Zen' },
-    { value: 'opencode/gemini-3.5-flash', label: 'Gemini 3.5 Flash', description: 'OpenCode Zen' },
-    { value: 'opencode/gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite', description: 'OpenCode Zen' },
-    { value: 'opencode/gemini-3.1-pro', label: 'Gemini 3.1 Pro', description: 'OpenCode Zen' },
-    { value: 'opencode/gemini-3-flash', label: 'Gemini 3 Flash', description: 'OpenCode Zen' },
-    { value: 'opencode/grok-4.5', label: 'Grok 4.5', description: 'OpenCode Zen' },
-    { value: 'opencode/grok-build-0.1', label: 'Grok Build 0.1', description: 'OpenCode Zen' },
-    { value: 'opencode/qwen3.7-max', label: 'Qwen3.7 Max', description: 'OpenCode Zen' },
-    { value: 'opencode/qwen3.7-plus', label: 'Qwen3.7 Plus', description: 'OpenCode Zen' },
-    { value: 'opencode/qwen3.6-plus', label: 'Qwen3.6 Plus', description: 'OpenCode Zen' },
-    { value: 'opencode/qwen3.5-plus', label: 'Qwen3.5 Plus', description: 'OpenCode Zen' },
-    { value: 'opencode/deepseek-v4-pro', label: 'DeepSeek V4 Pro', description: 'OpenCode Zen' },
-    { value: 'opencode/deepseek-v4-flash', label: 'DeepSeek V4 Flash', description: 'OpenCode Zen' },
-    { value: 'opencode/minimax-m3', label: 'MiniMax M3', description: 'OpenCode Zen' },
-    { value: 'opencode/minimax-m2.7', label: 'MiniMax M2.7', description: 'OpenCode Zen' },
-    { value: 'opencode/minimax-m2.5', label: 'MiniMax M2.5', description: 'OpenCode Zen' },
-    { value: 'opencode/glm-5.2', label: 'GLM 5.2', description: 'OpenCode Zen' },
-    { value: 'opencode/glm-5.1', label: 'GLM 5.1', description: 'OpenCode Zen' },
-    { value: 'opencode/kimi-k2.5', label: 'Kimi K2.5', description: 'OpenCode Zen' },
-    { value: 'opencode/kimi-k2.6', label: 'Kimi K2.6', description: 'OpenCode Zen' },
-    { value: 'opencode/kimi-k2.7-code', label: 'Kimi K2.7 Code', description: 'OpenCode Zen' },
-    { value: 'opencode/kimi-k3', label: 'Kimi K3', description: 'OpenCode Zen' },
-    { value: 'opencode/big-pickle', label: 'Big Pickle', description: 'OpenCode Zen · Free' },
-    { value: 'opencode/mimo-v2.5-free', label: 'MiMo-V2.5 Free', description: 'OpenCode Zen · Free' },
-    { value: 'opencode/laguna-s-2.1-free', label: 'Laguna S 2.1 Free', description: 'OpenCode Zen · Free' },
-    { value: 'opencode/ling-3.0-flash-free', label: 'Ling-3.0-flash Free', description: 'OpenCode Zen · Free' },
-    { value: 'opencode/north-mini-code-free', label: 'North Mini Code Free', description: 'OpenCode Zen · Free' },
-    { value: 'opencode/nemotron-3-ultra-free', label: 'Nemotron 3 Ultra Free', description: 'OpenCode Zen · Free' },
-    { value: 'opencode/deepseek-v4-flash-free', label: 'DeepSeek V4 Flash Free', description: 'OpenCode Zen · Free' },
-    {
-      value: 'opencode-go/grok-4.6',
-      label: 'Grok 4.6',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'low' }, { value: 'medium' }, { value: 'high' }, { value: 'xhigh' }],
-      },
-    },
-    {
-      value: 'opencode-go/glm-5.3-flash',
-      label: 'GLM 5.3 Flash',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
-      },
-    },
     {
       value: 'opencode-go/glm-5.3',
       label: 'GLM 5.3',
@@ -106,192 +59,8 @@ export const OPENCODE_PREDEFINED_MODELS: ProviderModelsDefinition = {
         values: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
       },
     },
-    {
-      value: 'opencode-go/glm-5.2',
-      label: 'GLM 5.2',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'high' }, { value: 'max' }],
-      },
-    },
-    { value: 'opencode-go/glm-5.1', label: 'GLM 5.1', description: 'OpenCode Go' },
     { value: 'zai/glm-5.3-flash', label: 'GLM 5.3 Flash (ccr)', description: 'Z.AI GLM (ccr)' },
     { value: 'zai/glm-5.3', label: 'GLM 5.3 (ccr)', description: 'Z.AI GLM (ccr)' },
-    {
-      value: 'opencode-go/gpt-5.6-luna',
-      label: 'GPT 5.6 Luna',
-      description: 'OpenCode Go',
-      effort: {
-        values: [
-          { value: 'none' },
-          { value: 'low' },
-          { value: 'medium' },
-          { value: 'high' },
-          { value: 'xhigh' },
-          { value: 'max' },
-        ],
-      },
-    },
-    {
-      value: 'opencode-go/kimi-k3',
-      label: 'Kimi K3',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'max' }],
-      },
-    },
-    { value: 'opencode-go/kimi-k2.7-code', label: 'Kimi K2.7 Code', description: 'OpenCode Go' },
-    { value: 'opencode-go/kimi-k2.6', label: 'Kimi K2.6', description: 'OpenCode Go' },
-    {
-      value: 'opencode-go/longcat-2.0',
-      label: 'LongCat 2.0',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'low' }, { value: 'medium' }, { value: 'high' }],
-      },
-    },
-    { value: 'opencode-go/mimo-v2.5', label: 'MiMo V2.5', description: 'OpenCode Go' },
-    { value: 'opencode-go/mimo-v2.5-pro', label: 'MiMo V2.5 Pro', description: 'OpenCode Go' },
-    {
-      value: 'opencode-go/minimax-m3',
-      label: 'MiniMax M3',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'none' }, { value: 'thinking' }],
-      },
-    },
-    { value: 'opencode-go/minimax-m2.7', label: 'MiniMax M2.7', description: 'OpenCode Go' },
-    {
-      value: 'opencode-go/muse-spark-1.3-contributor',
-      label: 'Muse Spark 1.3 Contributor',
-      description: 'OpenCode Go',
-      effort: {
-        values: [
-          { value: 'minimal' },
-          { value: 'low' },
-          { value: 'medium' },
-          { value: 'high' },
-          { value: 'xhigh' },
-        ],
-      },
-    },
-    {
-      value: 'opencode-go/muse-spark-1.2-contributor',
-      label: 'Muse Spark 1.2 Contributor',
-      description: 'OpenCode Go',
-      effort: {
-        values: [
-          { value: 'minimal' },
-          { value: 'low' },
-          { value: 'medium' },
-          { value: 'high' },
-          { value: 'xhigh' },
-        ],
-      },
-    },
-    {
-      value: 'opencode-go/qwen3.8-max',
-      label: 'Qwen3.8 Max',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
-      },
-    },
-    {
-      value: 'opencode-go/qwen3.8-flash',
-      label: 'Qwen3.8 Flash',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'low' }, { value: 'medium' }, { value: 'xhigh' }],
-      },
-    },
-    { value: 'opencode-go/qwen3.7-max', label: 'Qwen3.7 Max', description: 'OpenCode Go' },
-    { value: 'opencode-go/qwen3.7-plus', label: 'Qwen3.7 Plus', description: 'OpenCode Go' },
-    { value: 'opencode-go/qwen3.6-plus', label: 'Qwen3.6 Plus', description: 'OpenCode Go' },
-    {
-      value: 'opencode-go/deepseek-v4-pro',
-      label: 'DeepSeek V4 Pro',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'high' }, { value: 'max' }],
-      },
-    },
-    {
-      value: 'opencode-go/deepseek-v4-flash',
-      label: 'DeepSeek V4 Flash',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
-      },
-    },
-    {
-      value: 'opencode-go/deepseek-v4-flash-vision-exp',
-      label: 'DeepSeek V4 Flash Vision Exp',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
-      },
-    },
-    {
-      value: 'opencode-go/hy4-preview',
-      label: 'Hy4 Preview',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'none' }, { value: 'high' }],
-      },
-    },
-    {
-      value: 'opencode-go/hy3',
-      label: 'Hy3',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'none' }, { value: 'low' }, { value: 'high' }],
-      },
-    },
-    {
-      value: 'opencode-go/omen-alpha',
-      label: 'Omen Alpha',
-      description: 'OpenCode Go',
-      effort: {
-        values: [{ value: 'low' }, { value: 'high' }],
-      },
-    },
-    { value: 'anthropic/claude-opus-5', label: 'Claude Opus 5', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-5-fast', label: 'Claude Opus 5 Fast', description: 'Anthropic' },
-    { value: 'anthropic/claude-fable-5', label: 'Claude Fable 5', description: 'Anthropic' },
-    { value: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-4-8', label: 'Claude Opus 4.8', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-4-8-fast', label: 'Claude Opus 4.8 Fast', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-4-7', label: 'Claude Opus 4.7', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-4-7-fast', label: 'Claude Opus 4.7 Fast', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-4-6', label: 'Claude Opus 4.6', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-4-6-fast', label: 'Claude Opus 4.6 Fast', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-4-5', label: 'Claude Opus 4.5 (latest)', description: 'Anthropic' },
-    { value: 'anthropic/claude-opus-4-5-20251101', label: 'Claude Opus 4.5', description: 'Anthropic' },
-    { value: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', description: 'Anthropic' },
-    { value: 'anthropic/claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (latest)', description: 'Anthropic' },
-    { value: 'anthropic/claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', description: 'Anthropic' },
-    { value: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5 (latest)', description: 'Anthropic' },
-    { value: 'anthropic/claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', description: 'Anthropic' },
-    { value: 'openai/gpt-5.6', label: 'GPT-5.6', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-fast', label: 'GPT-5.6 Fast', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-pro', label: 'GPT-5.6 Pro', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-sol-fast', label: 'GPT-5.6 Sol Fast', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-sol-pro', label: 'GPT-5.6 Sol Pro', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-terra-fast', label: 'GPT-5.6 Terra Fast', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-terra-pro', label: 'GPT-5.6 Terra Pro', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-luna', label: 'GPT-5.6 Luna', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-luna-fast', label: 'GPT-5.6 Luna Fast', description: 'OpenAI' },
-    { value: 'openai/gpt-5.6-luna-pro', label: 'GPT-5.6 Luna Pro', description: 'OpenAI' },
-    { value: 'openai/gpt-5.5', label: 'GPT-5.5', description: 'OpenAI' },
-    { value: 'openai/gpt-5.5-fast', label: 'GPT-5.5 Fast', description: 'OpenAI' },
-    { value: 'openai/gpt-5.4', label: 'GPT-5.4', description: 'OpenAI' },
-    { value: 'openai/gpt-5.4-fast', label: 'GPT-5.4 Fast', description: 'OpenAI' },
-    { value: 'openai/gpt-5.4-mini', label: 'GPT-5.4 mini', description: 'OpenAI' },
-    { value: 'openai/gpt-5.4-mini-fast', label: 'GPT-5.4 mini Fast', description: 'OpenAI' },
-    { value: 'openai/gpt-5.3-codex-spark', label: 'GPT-5.3 Codex Spark', description: 'OpenAI' },
   ],
   DEFAULT: 'opencode/gpt-5.6-terra',
 };
@@ -317,6 +86,39 @@ const readOpenCodeJsonFile = async (filePath: string): Promise<Record<string, un
 };
 
 /**
+ * Reads the upstream provider ids OpenCode v2 records in its shared database.
+ *
+ * OpenCode v2 stores one `credential` row per connected integration and no
+ * longer writes the v1-era auth.json, so without this sweep a v2 install
+ * contributes no provider ids at all and the picker offers models the CLI
+ * cannot route. Only active rows count — rotating a login deactivates the
+ * replaced row. A missing database or an older layout without the credential
+ * table contributes nothing.
+ */
+const readDatabaseCredentialProviderIds = (): Set<string> => {
+  const providerIds = new Set<string>();
+  try {
+    const db = new Database(getOpenCodeDatabasePath(), { readonly: true, fileMustExist: true });
+    try {
+      const rows = db.prepare(
+        'SELECT integration_id FROM credential WHERE active = 1 AND integration_id IS NOT NULL',
+      ).all() as Array<{ integration_id?: string | null }>;
+      for (const row of rows) {
+        const integrationId = row.integration_id?.trim();
+        if (integrationId) {
+          providerIds.add(integrationId);
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Contributes nothing, mirroring the missing-auth.json handling.
+  }
+  return providerIds;
+};
+
+/**
  * Lists the upstream providers this OpenCode install can actually route to.
  *
  * OpenCode resolves `<providerID>/<modelID>` against the providers the user has
@@ -334,6 +136,10 @@ const readOpenCodeJsonFile = async (filePath: string): Promise<Record<string, un
 const readConnectedOpenCodeProviderIds = async (): Promise<Set<string> | null> => {
   const providerIds = new Set<string>();
   const configDir = path.join(os.homedir(), '.config', 'opencode');
+
+  for (const providerId of readDatabaseCredentialProviderIds()) {
+    providerIds.add(providerId);
+  }
 
   const auth = await readOpenCodeJsonFile(
     path.join(os.homedir(), '.local', 'share', 'opencode', 'auth.json'),
@@ -390,6 +196,173 @@ const filterOpenCodeModelsByProvider = (
   };
 };
 
+const execFileAsync = promisify(execFile);
+
+/** `opencode models` answers in ~100ms via the background service; a hung CLI must not pin the models endpoint. */
+const OPENCODE_MODELS_PROBE_TIMEOUT_MS = 5000;
+
+/** `<providerID>/<modelID>` as printed by `opencode models`; looser ids would never run anyway. */
+const OPENCODE_MODEL_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/i;
+
+/** Brand spellings the capitalized fallback label must not mangle. */
+const OPENCODE_LABEL_ACRONYMS: Record<string, string> = {
+  anthropic: 'Anthropic',
+  deepseek: 'DeepSeek',
+  glm: 'GLM',
+  gpt: 'GPT',
+  mimo: 'MiMo',
+  openai: 'OpenAI',
+};
+
+const humanizeOpenCodeModelLabel = (modelId: string): string => (
+  modelId
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((token) => OPENCODE_LABEL_ACRONYMS[token.toLowerCase()] ?? (
+      token.charAt(0).toUpperCase() + token.slice(1)
+    ))
+    .join(' ')
+);
+
+/** Gateway display names for OpenCode's own provider families; other families route directly. */
+const OPENCODE_FAMILY_DESCRIPTIONS: Record<string, string> = {
+  opencode: 'OpenCode Zen',
+  'opencode-go': 'OpenCode Go',
+};
+
+type OpenCodeCatalogModelEntry = {
+  name?: string;
+  reasoning_options?: Array<{ type?: string; values?: string[] }>;
+};
+
+/**
+ * Reads the models.dev catalog OpenCode caches in its database (`kv` key
+ * `models-dev:catalog`) and maps `<family>/<modelId>` to the display name and
+ * reasoning-effort values it records for each model.
+ *
+ * This is where the reasoning-variant data lives in v2 — `opencode models`
+ * prints ids only, but this catalog carries `reasoning_options` per model and
+ * is refreshed by the CLI itself. A missing database, missing key, or a
+ * `body` encoded as an embedded JSON string all degrade to an empty map, so
+ * options fall back to synthesized labels without effort variants.
+ */
+const readOpenCodeCatalogEntries = (): Map<string, OpenCodeCatalogModelEntry> => {
+  const entries = new Map<string, OpenCodeCatalogModelEntry>();
+  try {
+    const db = new Database(getOpenCodeDatabasePath(), { readonly: true, fileMustExist: true });
+    try {
+      const row = db.prepare("SELECT value FROM kv WHERE key = 'models-dev:catalog'").get() as {
+        value?: string;
+      } | undefined;
+      const parsed = readJsonRecord(row?.value);
+      let body: unknown = parsed?.body;
+      if (typeof body === 'string') {
+        body = JSON.parse(body);
+      }
+      const families = readObjectRecord(body) ?? {};
+      for (const [familyId, family] of Object.entries(families)) {
+        const models = readObjectRecord(readObjectRecord(family)?.models) ?? {};
+        for (const [modelId, model] of Object.entries(models)) {
+          const record = readObjectRecord(model);
+          if (record) {
+            entries.set(`${familyId}/${modelId}`, record as OpenCodeCatalogModelEntry);
+          }
+        }
+      }
+    } finally {
+      db.close();
+    }
+  } catch {
+    // No database or no cached catalog: options fall back to synthesis.
+  }
+  return entries;
+};
+
+const buildOpenCodeModelOption = (
+  value: string,
+  catalogEntries: Map<string, OpenCodeCatalogModelEntry> = new Map(),
+): ProviderModelOption => {
+  const curated = OPENCODE_PREDEFINED_MODELS.OPTIONS.find((option) => option.value === value);
+  if (curated) {
+    return curated;
+  }
+
+  const familyId = value.slice(0, value.indexOf('/'));
+  const modelId = value.slice(value.indexOf('/') + 1);
+  // Direct-connect families (anthropic/openai/...) are labeled with their own
+  // name — stamping them "OpenCode Zen" would misrepresent where the run goes.
+  const gateway = OPENCODE_FAMILY_DESCRIPTIONS[familyId] ?? humanizeOpenCodeModelLabel(familyId);
+  const catalogEntry = catalogEntries.get(value);
+  const effortValues = (catalogEntry?.reasoning_options ?? [])
+    .find((option) => option?.type === 'effort')
+    ?.values?.filter((entry): entry is string => typeof entry === 'string') ?? [];
+
+  return {
+    value,
+    label: catalogEntry?.name?.trim() || humanizeOpenCodeModelLabel(modelId),
+    description: modelId.endsWith('-free') && familyId.startsWith('opencode')
+      ? `${gateway} · Free`
+      : gateway,
+    ...(effortValues.length > 0
+      ? { effort: { values: effortValues.map((effortValue) => ({ value: effortValue })) } }
+      : {}),
+  };
+};
+
+/**
+ * Builds the account-scoped catalog from the ids `opencode models` reported.
+ *
+ * The curated default survives when the account has that model enabled;
+ * otherwise the first reported model takes over, so the picker never opens on
+ * a model the CLI would refuse to run.
+ */
+const buildAccountScopedOpenCodeCatalog = (
+  modelIds: string[],
+  catalogEntries: Map<string, OpenCodeCatalogModelEntry>,
+): ProviderModelsDefinition => {
+  const options = modelIds.map((modelId) => buildOpenCodeModelOption(modelId, catalogEntries));
+  const curatedDefault = OPENCODE_PREDEFINED_MODELS.DEFAULT;
+  return {
+    OPTIONS: options,
+    DEFAULT: options.some((option) => option.value === curatedDefault)
+      ? curatedDefault
+      : options[0].value,
+  };
+};
+
+/**
+ * Runs `opencode models` and returns the `<providerID>/<modelID>` ids it
+ * reports, deduplicated in output order.
+ *
+ * This is the account's own model list — the console entitlements — so it is
+ * strictly narrower and fresher than the anchor catalog. Any failure
+ * (missing CLI, non-zero exit, timeout, empty output) returns empty so the
+ * caller falls back to the curated catalog. The executable override follows
+ * the CLAUDE_CLI_PATH / CLOUDCLI_ZCODE_ENGINE precedent and is read per call
+ * so tests can install a fake after import; without an override the shared
+ * engine-path resolver supplies the binary (platform install locations
+ * included, which matters under pm2 where PATH may lack Homebrew).
+ */
+const readOpenCodeCliModelIds = async (): Promise<string[]> => {
+  const executable = process.env.CLOUDCLI_OPENCODE_CLI?.trim() || tryResolveOpenCodeEnginePath() || 'opencode';
+  try {
+    const { stdout } = await execFileAsync(executable, ['models'], {
+      timeout: OPENCODE_MODELS_PROBE_TIMEOUT_MS,
+    });
+
+    const modelIds: string[] = [];
+    for (const line of stripAnsiSequences(stdout).split(/\r?\n/)) {
+      const modelId = line.trim();
+      if (modelId && OPENCODE_MODEL_ID_PATTERN.test(modelId) && !modelIds.includes(modelId)) {
+        modelIds.push(modelId);
+      }
+    }
+    return modelIds;
+  } catch {
+    return [];
+  }
+};
+
 const parseOpenCodeSessionModelValue = (rawModel: unknown): string | null => {
   if (typeof rawModel === 'string') {
     const trimmed = rawModel.trim();
@@ -431,9 +404,17 @@ const parseOpenCodeSessionModelValue = (rawModel: unknown): string | null => {
   return modelId;
 };
 
-/** Provider registry model adapter for OpenCode predefined models and session metadata. */
+/** Provider registry model adapter for OpenCode account models and session metadata. */
 export class OpenCodeProviderModels implements IProviderModels {
   async getSupportedModels(): Promise<ProviderModelsDefinition> {
+    // `opencode models` reports exactly the models the logged-in account can
+    // route — narrower and fresher than the anchor catalog, which only
+    // covers the fallback path (CLI missing, failing, or answering empty).
+    const cliModelIds = await readOpenCodeCliModelIds();
+    if (cliModelIds.length > 0) {
+      return buildAccountScopedOpenCodeCatalog(cliModelIds, readOpenCodeCatalogEntries());
+    }
+
     return filterOpenCodeModelsByProvider(
       OPENCODE_PREDEFINED_MODELS,
       await readConnectedOpenCodeProviderIds(),
@@ -455,26 +436,29 @@ export class OpenCodeProviderModels implements IProviderModels {
       const db = new Database(dbPath, { readonly: true, fileMustExist: true });
 
       try {
-        const row = db.prepare(`
-          SELECT
-            s.id AS sessionId,
-            s.model AS model,
-            s.agent AS agent,
-            s.directory AS directory,
-            s.time_updated AS timeUpdated,
-            s.time_created AS timeCreated
-          FROM session s
-          WHERE s.id = ?
-          ORDER BY COALESCE(s.time_updated, s.time_created, 0) DESC
-          LIMIT 1
-        `).get(providerSessionId) as {
-          sessionId?: string;
-          model?: unknown;
-          agent?: string | null;
-          directory?: string | null;
-          timeUpdated?: number | null;
-          timeCreated?: number | null;
-        } | undefined;
+        const table = resolveOpenCodeSessionTableName(db);
+        const row = table
+          ? db.prepare(`
+              SELECT
+                s.id AS sessionId,
+                s.model AS model,
+                s.agent AS agent,
+                s.directory AS directory,
+                s.time_updated AS timeUpdated,
+                s.time_created AS timeCreated
+              FROM ${table} s
+              WHERE s.id = ?
+              ORDER BY COALESCE(s.time_updated, s.time_created, 0) DESC
+              LIMIT 1
+            `).get(providerSessionId) as {
+              sessionId?: string;
+              model?: unknown;
+              agent?: string | null;
+              directory?: string | null;
+              timeUpdated?: number | null;
+              timeCreated?: number | null;
+            } | undefined
+          : undefined;
 
         const model = parseOpenCodeSessionModelValue(row?.model);
         if (model) {
