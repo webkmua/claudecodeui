@@ -197,6 +197,8 @@ export function useChatSessionState({
   /* ---------------------------------------------------------------- */
 
   const activeSessionId = selectedSession?.id || currentSessionId || null;
+  /** The id of the session on screen, without the rest of its metadata. */
+  const openSessionId = selectedSession?.id ?? null;
 
   // The activity indicator always reflects the latest status of the session
   // being viewed — never stale local UI state from the last time it was
@@ -206,20 +208,28 @@ export function useChatSessionState({
   const hasActiveBackgroundTasks = activeSessionId ? sessionStore.hasPendingBackgroundWork(activeSessionId) : false;
   const processingActivity = (activeSessionId && processingSessions?.get(activeSessionId)) || null;
   const backgroundStartedAt = activeSessionId ? sessionStore.getBackgroundWorkStartedAt(activeSessionId) : undefined;
+  const backgroundCanInterrupt = activeSessionId ? sessionStore.canInterruptBackgroundWork(activeSessionId) : true;
   // A response turn keeps its own activity. The background phase times from
-  // its tasks rather than from whenever this tab marked it busy, and stays
-  // cancellable even when an activity poll lists it as not interruptible;
-  // only Claude broadcasts the frames that make it pending here.
+  // its tasks rather than from whenever this tab marked it busy, and its Stop
+  // follows what the runtime that broadcast the tasks says — not the activity
+  // poll, which lists every background session as not interruptible.
   const sessionActivity = hasActiveBackgroundTasks && backgroundStartedAt !== undefined
     && !(processingActivity && !processingActivity.background) ? {
       statusText: null,
       ...processingActivity,
       startedAt: backgroundStartedAt,
       background: backgroundTasks.length > 0,
-      canInterrupt: true,
+      canInterrupt: backgroundCanInterrupt,
     } : processingActivity;
   const isProcessing = sessionActivity !== null;
   const canAbortSession = isProcessing && sessionActivity.canInterrupt;
+  // A reply in flight always holds a new message back. Background work does
+  // too, unless its runtime takes the next turn alongside it (Claude's held
+  // process), in which case sending at once disturbs nothing.
+  const isReplyInFlight = Boolean(processingActivity && !processingActivity.background);
+  const isInputBlocked = isReplyInFlight
+    || ((isProcessing || hasActiveBackgroundTasks)
+      && !(activeSessionId && !sessionStore.backgroundWorkQueuesInput(activeSessionId)));
 
   // Ref mirror so effects can read the latest map without re-running on
   // every activity transition.
@@ -325,14 +335,14 @@ export function useChatSessionState({
   }
 
   const chatMessages = useMemo(() => {
-    const all = normalizedToChatMessages(storeMessages);
+    const all = normalizedToChatMessages(storeMessages, { holdOrphanedLiveRows: isProcessing });
     // Show pending user message when no session data exists yet (new session, pre-backend-response)
     if (pendingUserMessage && all.length === 0) {
       return [pendingUserMessage];
     }
     if (viewHiddenCount > 0 && viewHiddenCount < all.length) return all.slice(0, -viewHiddenCount);
     return all;
-  }, [storeMessages, viewHiddenCount, pendingUserMessage]);
+  }, [storeMessages, viewHiddenCount, pendingUserMessage, isProcessing]);
 
   /* ---------------------------------------------------------------- */
   /*  addMessage / clearMessages / rewindMessages                     */
@@ -440,10 +450,7 @@ export function useChatSessionState({
     statusCheckSentAtRef.current.set(selectedSession.id, Date.now());
     sendMessage({
       type: 'chat.subscribe',
-      sessions: [{
-        sessionId: selectedSession.id,
-        lastSeq: sessionStore.getResumeSeq(selectedSession.id),
-      }],
+      sessions: [sessionStore.getSubscriptionCursor(selectedSession.id)],
     });
   }, [selectedProject, selectedSession, sendMessage, sessionStore, statusCheckSentAtRef, ws]);
 
@@ -552,7 +559,7 @@ export function useChatSessionState({
 
   // External message update (e.g. WebSocket reconnect, background refresh)
   useEffect(() => {
-    if (!externalMessageUpdate || !selectedSession || !selectedProject) return;
+    if (!externalMessageUpdate || !openSessionId || !selectedProject) return;
 
     const reloadExternalMessages = async () => {
       try {
@@ -560,7 +567,7 @@ export function useChatSessionState({
         if (!isProcessing) {
           // Sticking is the viewport's default while pinned; a refresh that
           // replaces the tail needs no separate scroll choreography.
-          await requestLatestMessages(selectedSession.id);
+          await requestLatestMessages(openSessionId);
         }
       } catch (error) {
         console.error('Error reloading messages from external update:', error);
@@ -572,7 +579,9 @@ export function useChatSessionState({
     externalMessageUpdate,
     requestLatestMessages,
     selectedProject,
-    selectedSession,
+    // The session's id, not the session itself: a title that arrives for the
+    // open session must not read as "the transcript changed".
+    openSessionId,
     isProcessing,
   ]);
 
@@ -758,6 +767,8 @@ export function useChatSessionState({
     canAbortSession,
     backgroundTasks,
     hasActiveBackgroundTasks,
+    isReplyInFlight,
+    isInputBlocked,
     currentSessionId,
     setCurrentSessionId,
     isLoadingSessionMessages,

@@ -1,6 +1,6 @@
 # 聊天链路（Chat Pipeline）
 
-> 基准：2.9.0 / 2026-10-17
+> 基准：2.10.0 / 2026-10-20
 > **核心文档**：改动 `server/modules/websocket/**` 或 `src/modules/chat/**` 时**必须同步更新本文**。
 > 普通 bug 修复不动架构的不需要更新（提交时走 `--no-verify`，见 `AGENTS.md`）。
 
@@ -64,9 +64,28 @@ flowchart TD
 - 输入框底部的模型菜单按 `ProviderModelOption` 呈现；当选项带有 `group` 字段时，前端以 `ComposerMenuHeading` 划分展示区块（如个人套餐与体验套餐分组），消除同名模型混淆。
 - 选项标识与展示解耦：底层 `value` 允许包含 Provider 前缀（例如 `account:bigmodel-start-plan/GLM-5.3-Flash`）以保障后端唯一路由；触发器与折叠标题通过友好前缀截断与 `label` 解析，保证用户可见区域始终展示人类可读的友好名称，绝不泄露底层内部原始 ID。
 
+### 子 agent 卡片只认 `Agent`
+
+前端把工具名等于 `Agent` 的 `tool_use` 行渲染成子 agent 面板（`useChatMessages` 的 `isSubagentContainer`，常量来自 `shared/protocol/subagent.ts`），不按引擎分支，也不看 `Task`：`Task` 只指任务清单类工具。面板的状态先看历史行上的 `subagent`：它给出 `running` 以外的状态就是定论；否则看 `task_status` 事件（实时，按 `toolUseId` 折回这张卡）；两者都没有时才看工具结果：结果带错误标记（引擎拒绝了这次派发，例如 agent 类型不存在）读作 `failed`，其余有结果读作完成，没有结果读作运行中。状态文案和 `stopped` 的提示语走 `chat` 命名空间的 `subagent.*` 键。面板的 `subagent`、`subagentActivity` 由转换函数从后端行的 `subagent`、`subagentTools` 原样带上；直播送来的、`parentToolUseId` 指向某张 `Agent` 卡的行（工具调用、定稿文本、思考，含对应工具结果）不进主线程，而是折成这张卡的时间线，历史行自带 `subagentTools` 时以历史为准。转换缓存按被折进的子行（含它们的结果）是否变化失效。
+
+折叠的归属规则：行的 `parentToolUseId` 沿父链找到最外层的 `Agent` 调用，行就折进那张顶层卡；agent 里再派的 agent 只是外层卡时间线里的一步，它名下的行也折进同一张外层卡。父链沿途的非 agent 调用不影响结果（取最外层的 `Agent`），父链成环时在闭合处截断，环里的 agent 仍是卡片。父链走不到任何 agent 且止于本页没有的调用时：会话还在运行（有前台回复或后台工作）且这是直播行（带 `seq`）才先不进主线程、等卡片到了再折入，避免先出现在主线程又跳走；历史行（卡片可能在未加载的页里）和会话已经结算后的行照常显示在主线程，不会永远消失；父调用存在但不是 `Agent`（Bash、workflow）的行照常留在主线程。
+
+运行中的卡片（后端和直播都没给出结算状态）在折叠的标题下多一行进度：步数和最新一步（`Bash: npm test` 这样的“工具名: 输入要点”，由 `describeLatestStep` 生成）；展开时显示最新的步骤，更早的收在“显示更早的 N 步”后，结算后恢复为从头显示。卡片默认仍是折叠的。
+
+批准和提问卡片的 `context.subagent`（`toolUseId`、`description`）由 provider 在边界填入，横幅在卡片上方显示“来自子 agent：<description>”。一轮成功结束（`complete`）时，带 `context.subagent` 的卡片保留（派它的后台 agent 可能还在跑，要撤回由服务端发 `permission_cancelled`），其余卡片随这一轮清掉；失败或中止的结束清掉全部。没有前台回复在跑时到达的批准卡片只把会话记成后台工作（`onSessionProcessing(id, { awaitingApproval: true })`），不会让它变成前台“处理中”。各引擎怎样把自家的派 agent 形态翻成 `Agent` 行、怎样保证结算，见 [providers.md](./providers.md)「子 agent 卡片」。
+
 ## 断线恢复
 
-- `seq` 由 run registry 按 session 维护单调水位：跨 run 续数、不随缓冲驱逐失效，服务端单方定义，客户端只透传（取 max 对账）。重连后发 `chat.subscribe`（带 `lastSeq`）→ 活跃 run 从缓冲精确补发；ack 带权威 `lastSeq` 与 `stale` 标志——`stale: true` 表示 `lastSeq` 已落在缓冲窗之前（5000 条上限 / 5 分钟保留），客户端补一次 REST 刷新。完成态 run 不 replay，走 REST。
+`chat-run-registry.service.ts` 在网关进程启动时生成 `streamEpoch`，并为每个会话跨回合续增 `seq`；序号、受众和重放缓存挂在会话通道上，回合的 writer 与会话级发布入口共用这条通道。传输事件身份是 `(streamEpoch, sessionId, seq)`，重放保留原身份，引擎不能指定网关代次。历史行继续使用引擎行 ID 和 `providerRowKey`，不参加传输事件账。
+
+例如，页面已连续处理到事件 931，再收到事件 818，`SessionTimelineStore.applyServerEvent` 会直接退出，文字、思考和完成指令都不再执行。页面仅处理到 817 却先收到 931 时，Store 委托 `sessionEventReplay.ts` 暂存后续事件并补订阅。缺口补齐后，每条事件先改状态、登记成功，再执行对应指令，然后处理下一条。状态应用失败不前进游标。
+
+`chat.subscribe` 携带已确认代次和连续应用游标。`chat_subscribed.lastSeq` 是服务端产生进度，不能当作页面应用进度；`replayFromSeq` 声明完整重放窗口下界。缺口超出窗口、缓存超限或服务端重启时，Store 关闭旧流段，保留可见输出，使用确认中的后台任务和权限快照对账，并通过历史刷新建立恢复基线。历史失败不推进基线。完成态不补事件，确认声明需要历史对账的位置。共享预算以 `shared/protocol/frames.ts` 的 `CHAT_REPLAY_LIMITS` 为准。
+
+恢复失败会保留错误提示并退避重试；成功后清除提示。观察者通知失败不重复应用已提交状态，也不阻断后续连续缓存；错误仍沿接收链报告。
+
+新 socket 的确认建立代次，确认前的事件有界暂存；同连接代次冲突报告错误并补订阅。没有代次的旧服务端保留旧接收行为，不启用新过滤。完整修复需要前后端同时更新，旧页面需要重载。
+
 - WS 鉴权用 query token 或 Authorization 头（`websocket-auth.service.ts`）；30s 心跳在 `websocket-server.service.ts`。
 - `websocket_reconnected` 帧是前端 `src/shared/context/WebSocketContext.tsx` 本地合成的，用于各订阅方追赶。
 
@@ -78,21 +97,25 @@ flowchart TD
 - 批准记忆（`rememberEntry`）各引擎语义不同：claude 往 `allowedTools` 追加一条规则，codex 改答 `acceptForSession`（由引擎自己记住本会话）。
 - **谁来复核由引擎配置决定，适配器不覆盖**：codex 的 `approvals_reviewer`（`user` / `auto_review` / `guardian_subagent`）决定请求是否在到达客户端前就被自动裁决；在 `thread/start` 里写死这个值等于悄悄推翻用户自己的设置。
 
+权限卡片的推送通知由网关统一发（`ChatSessionWriter.send` 看到 `permission_request` 就调用通知服务），各引擎适配器不再各自发一份；没有前台回复在跑时到达的卡片（后台 agent 在一轮结束后发出的请求）不会把会话记成“处理中”，只记成后台工作。
+
 ## 后台任务与输入排队
 
-- **引擎后台驻留契约**：Claude 等引擎支持在回合中开启后台执行（如后台 `Bash`、Agent 或定时唤醒）。当前轮次的文本回复完成后发出 `complete`，但底层后台进程仍在运行，引擎 runtime 保持挂起。`TaskCreate` 只创建待办项，不属于后台执行。
+- **引擎后台驻留契约**：Claude 等引擎支持在回合中开启后台执行（如后台 `Bash`、Agent 或定时唤醒）。广播任务条的引擎是 Claude、Antigravity、Codex、ZCode；OpenCode 没有后台登记，不发任务条。当前轮次的文本回复完成后发出 `complete`，但底层后台进程仍在运行，引擎 runtime 保持挂起。`TaskCreate` 只创建待办项，不属于后台执行。
 - **状态同步与广播**：
   - `ActiveBackgroundTask` 表示输入框需要展示的执行任务，具体字段以共享协议为准。
   - `chat_subscribed` 握手帧与 `status(background_tasks)` 同时携带卡片列表 `backgroundTasks` 和后台等待状态 `backgroundWorkPending`，供实时更新与重连恢复；归一化网关放行两者。
+  - 两种帧还说明新消息要不要等这批工作：状态帧和订阅确认都用 `backgroundWorkQueuesInput`，缺省为要等。Claude 发 `false`，因为新消息会成为驻留进程的下一轮，不打断后台工作（见 providers.md「Claude 后台任务生命周期」）。
+  - 两种帧还说明这批工作能不能用 `chat.abort` 停：状态帧用 `canInterrupt`，订阅确认用 `backgroundCanInterrupt`。字段缺省按能停处理；ZCode 一轮结束后 agent 还在跑，此时发 `false`，后台阶段的活动不给停止按钮，排队照旧。
   - 卡片描述任务本身，等待状态还包括任务完成后的汇报回复。任务完成或唤醒到期时卡片立即消失，后续回复结束后才解除等待。未提供等待字段的引擎按卡片列表判断。
 - **输入防打断与智能排队**：
-  - `useChatComposerState` 监听 `hasActiveBackgroundTasks`：在后台任务执行期间（即使主轮次已发出 `complete`），用户发送新消息自动转入 `queuedDraft` 排队，阻止过早发送打断正在运行的后台子进程。
+  - 新消息要不要排队由 `useChatSessionState` 的 `isInputBlocked` 决定：主轮正在回复时一定排队；只剩后台工作时，按该会话的 `backgroundWorkQueuesInput` 决定。要排队时发送转入 `queuedDraft`，阻止新一轮打断后台子进程；Claude 的后台阶段不排队，消息直接发出，任务条和活动指示照常显示。任务条的提示跟着走：主轮回复中写“本轮结束后发送”，后台工作挡输入时写“任务完成后自动发送”，不挡时写“可直接发送，后台任务继续运行”。
   - **自动释放**：后台执行和后续回复均结束且无新状态阻塞时，composer 的 flush 效应自动解冻排队草稿并发出。服务端的后台驻留检查也包含后续回复，切走会话或断线不改变等待条件。
-  - **强制中断逃生通道**：排队卡片提供 `forceSendQueuedDraft`（`isForced: true`），允许用户在需要时显式跳过等待，以 `forceInterrupt: true` 打断后台任务并立即发送。
-  - **会话忙状态与取消**：实时完成帧和订阅确认在后台等待期间保留会话的后台活动，切走会话的自动发送也等到后续回复结束。后台结束帧只清后台活动，不清新主轮的活动；这条判定不依赖时钟，两个阶段在同一毫秒交接也成立。
-  - **停止入口**：任务卡保留启动调用的身份，独立停止使用引擎提供的停止句柄，两者不可混用。后台任务栏仅在所有卡片均有停止句柄时提供中止，逐个发送 `chat.stop-task`，不打断同时运行的主轮。顶部停止和 Esc 共用会话取消入口：主轮正在响应时发送 `chat.abort`；仅剩可单独停止的后台任务时逐个停止；没有独立句柄或只剩汇报回复时发送 `chat.abort` 结束驻留会话。服务端接受仍有后台工作的完成态会话取消，不重复发送主轮的完成帧。卡片和排队状态都等待引擎确认，停止请求本身不清状态，失败仍显示错误。
-  - **停止失败**：找不到运行任务、缺少任务句柄、引擎拒绝停止和会话取消失败均保留现有活动，不解除排队。异常响应携带所属会话；`TASK_STOP_FAILED` 与 `ABORT_FAILED` 分别表示任务停止和会话取消的引擎异常，错误仍进入聊天记录。
-  - **可视化呈现**：输入框上方通过 `BackgroundTaskIndicator` 实时展示运行中的后台任务（工具名、命令、动态已用时间）。
+  - **强制发送逃生通道**：排队卡片提供 `forceSendQueuedDraft`（`isForced: true`），允许用户显式跳过等待立即发送。只有主轮已经结束、只剩后台工作时才给这个按钮（`canForceSendQueuedDraft`）：主轮还在回复时服务端拒绝第二个运行（`RUN_IN_PROGRESS`），按钮只会失败。服务端不读请求里的 `forceInterrupt`。会出现这个按钮的只剩后台工作挡输入的引擎（ZCode 回合结束后 agent 还在跑），ZCode 新开一轮不停 agent，所以按钮写“立即发送，后台任务继续运行”。
+  - **会话忙状态与取消**：主轮还在回复时到达的任务条帧（Codex、ZCode 在轮内派出又收回的 agent）只更新卡片，不把会话改记成后台活动，也不触发完工提示；轮结束后是否进入后台阶段由 `complete` 决定。实时完成帧和订阅确认在后台等待期间保留会话的后台活动，切走会话的自动发送也等到后续回复结束。后台结束帧只清后台活动，不清新主轮的活动；这条判定不依赖时钟，两个阶段在同一毫秒交接也成立。
+  - **停止入口**：任务卡保留启动调用的身份，独立停止使用引擎提供的停止句柄，两者不可混用。后台任务栏仅在所有卡片均有停止句柄时提供中止，逐个发送 `chat.stop-task`，不打断同时运行的主轮。顶部停止和 Esc 共用会话取消入口：主轮正在响应时发送 `chat.abort`。本轮起的后台工作是否保留由引擎决定：Claude 只打断这一轮，后台 Bash 继续跑、后台 agent 由 CLI 停掉（见 providers.md「Claude 后台任务生命周期」）；Antigravity、Codex 的后台工作随这一轮结束；仅剩可单独停止的后台任务时逐个停止；没有独立句柄或只剩汇报回复时发送 `chat.abort` 结束驻留会话。服务端接受仍有后台工作的完成态会话取消，不重复发送主轮的完成帧。卡片和排队状态都等待引擎确认，停止请求本身不清状态，失败仍显示错误。
+  - **停止失败**：找不到运行任务、缺少任务句柄、引擎拒绝停止和会话取消失败均保留现有活动，不解除排队；发送被 `RUN_IN_PROGRESS` 拒绝时同样保留，因为拒绝本身说明还有运行在进行。异常响应携带所属会话；`TASK_STOP_FAILED` 与 `ABORT_FAILED` 分别表示任务停止和会话取消的引擎异常，错误仍进入聊天记录。
+  - **可视化呈现**：输入框上方通过 `BackgroundTaskIndicator` 实时展示运行中的后台任务（工具名、命令、动态已用时间）。提交按钮只在停止能起作用、且输入框里没有可以直接发出的内容时显示成停止；会话忙但停不了时保持发送按钮，空输入时禁用，输入内容后点击即排队；Claude 后台阶段输入了内容，按钮就是发送。
   - **完工庆祝防误报**：`useChatRealtimeHandlers` 在收到 `complete` 时，若会话仍有后台等待，则暂不触发完工音效与窗口标题提示；待后台等待解除时统一触发。卡片消失本身不表示汇报回复已结束。
 
 ## run 的结束原因（诊断契约）
@@ -114,6 +137,8 @@ flowchart TD
 ## 落盘同步（run 之外的第二条持久化路）
 
 run 结束 → `sessions-watcher.service.ts`（chokidar，watch 根由各引擎 `getSessionWatchTarget()` 声明）→ `session-synchronizer.service.ts` `synchronizeFile` → `sessionsDb` upsert → `session-upserted-broadcast.service.ts` 推 `session_upserted`（侧边栏增量，归 projects 状态管，不归 chat）。会话离开活跃列表（归档：自动归档手动/定时、单会话归档；强制删除）由同一服务推 `session_removed`（批量 `sessionIds` 一帧，前端按 id 从 projects 树剔除，幂等）。历史读取走 `GET /api/providers/sessions/:sessionId/messages`（尾偏移分页：`offset: 0` 是最新一页），读密集缓存见 `session-history-cache.service.ts`。
+
+`session_upserted` 带一个可选的 `metadataOnly` 标记：只带新名字的增量（引擎自己起的名，如 opencode）打这个标记。带标记的增量只许改名字，不许重读消息、不许打待看标记、不许改列表排序与活跃时间；不带标记的增量保持原义（会话有动静，客户端要重新看）。产生方必须能确认变化来源，不能靠「两个推送里的名字不同」反推。前端收到带标记的增量后，当前会话的副本要换新对象才能带上新名字；重读消息的副作用因此只能挂在会话 id 上，不能挂在会话对象上。
 
 ## 接收侧：WS 帧 → React 的四层
 
@@ -200,3 +225,11 @@ flowchart LR
 | 新增工具卡片渲染 | `src/modules/chat/tools/configs/toolConfigs.ts` 注册（配置驱动，**禁止散落条件分支**），复杂内容加 ContentRenderer；见 `src/modules/chat/tools/README.md`。工具别名/展示分类/命令提取统一在 `toolTaxonomy.ts`，别再拷贝名单 |
 | 新增权限相关能力 | 引擎 runtime 的 `permissions` 网关 → 矩阵自动推导 `supportsPermissionRequests` → 前端按矩阵渲染 |
 | 改历史分页 | `src/modules/chat/utils/sessionMessagePagination.ts` + store 的序列化测试（`sessionTimelineSequences.test.ts`）必须跟着改 |
+
+## 重连缓存的容量
+
+例如一个工具返回一张内嵌截图，writer 广播的是图片资源引用，registry 不保留图片正文。registry 同时限制单条事件、单个运行和所有运行的缓存字节数，并保留条数限制。预算常量以 `chat-run-registry.service.ts` 为准；字节数按序列化消息计费，与 Node 实际堆占用不同。
+
+**两套受众各管各的。** 运行（round）的受众是这一轮开始时就在看的那些 socket：这一轮结束后才打开会话的标签页不接收这轮的迟到事件，它靠重放补上。会话通道的受众是订阅了这个会话的 socket：常驻引擎在自己那一轮结束后发的汇报走这条通道，订阅着的标签页都要收到。运行在跑、或会话还有后台工作时，socket 同时进两套受众。
+
+单条超预算事件仍发给当前在线客户端，但不进入重放缓存。缓存不足时先裁掉较早会话的旧事件。每个会话记录最大的缺失序号，客户端订阅序号早于缺失位置时收到 `stale: true`，包括从零订阅、缓存已空和中间单条事件被跳过的情况。重放缓存与序号属于**会话**而不是某一次运行：新一轮只换运行记录，不换会话通道，这样引擎在回合结束后自发的汇报回合也有唯一序号、有受众、可重放。运行过期和测试清空释放对应字节账目。运行过期后，客户端序号落后于会话水位时仍标记缺口，避免断线期间完成的结果被漏掉。全局预算只约束 registry 的缓存，不代表整个服务进程的内存上限。

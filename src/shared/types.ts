@@ -199,6 +199,11 @@ export type ProjectSession = {
   messageCount?: number;
   provider?: LLMProvider;
   __provider?: LLMProvider;
+  // Git worktree the session actually runs in, when an engine rebound it out
+  // of the owning project's main checkout; the workspace header labels the
+  // session with the branch. Null/absent for main-checkout sessions.
+  worktreePath?: string | null;
+  worktreeBranch?: string | null;
   // Tags the session with the owning project's DB `projectId` so UI handlers
   // (session switching, sidebar focus, etc.) can match against selectedProject.
   __projectId?: string;
@@ -306,10 +311,14 @@ export type SessionActivity = {
 /** Every busy session, keyed by session id. Read it to tell whether a session is busy; check `background` to tell how. */
 export type SessionActivityMap = ReadonlyMap<string, SessionActivity>;
 
-/** Marks a response or background phase as active; a new send starts a response phase immediately. */
+/**
+ * Marks a response or background phase as active; a new send starts a response phase immediately.
+ * `awaitingApproval` is for an approval card that arrives on its own: it leaves an existing entry
+ * untouched and, when the session is idle, records background work rather than a response in flight.
+ */
 export type MarkSessionProcessing = (
   sessionId?: string | null,
-  activity?: { statusText?: string | null; canInterrupt?: boolean; background?: boolean },
+  activity?: { statusText?: string | null; canInterrupt?: boolean; background?: boolean; awaitingApproval?: boolean },
 ) => void;
 
 /** Clears the response phase by default, or only the background phase with `backgroundOnly`. `ifStartedBefore` guards stale response acknowledgements. */
@@ -725,7 +734,7 @@ export type CodeEditorDiffInfo = {
   [key: string]: unknown;
 };
 
-/** A file handed to the code editor for viewing or editing, carrying its display name, workspace-relative path, owning DB projectId for read/save requests and any diff to highlight. */
+/** A file handed to the code editor for viewing or editing, carrying its display name, absolute workspace path, owning DB projectId for read/save requests and any diff to highlight. */
 export type CodeEditorFile = {
   name: string;
   path: string;
@@ -742,6 +751,19 @@ export type CodeEditorFile = {
 export type CodeEditorGotoTarget = {
   // 1-based, clamped to the document by the editor surface.
   line: number;
+};
+
+/**
+ * Where the local image references inside a rendered Markdown document resolve
+ * from. Markdown paths are relative to the document that carries them, so
+ * `baseDir` is that document's absolute directory; `projectId` addresses the
+ * files route that serves it, and `isExternal` marks a document that lives
+ * outside the project (read through the external read-only route instead).
+ */
+export type MarkdownImageContext = {
+  projectId?: string;
+  baseDir?: string;
+  isExternal: boolean;
 };
 
 /** The category of browser-renderable media a file maps to, used by the code editor to decide whether to show an inline image, PDF, video or audio preview instead of a text buffer. */
@@ -1661,9 +1683,17 @@ type TaskStatus =
 type TaskPriority = 'high' | 'medium' | 'low' | string;
 
 // ─── Fork additions consolidated from src/types/app, chat/types, settings/types ───
-export type AntigravityPermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+/** The four permission modes every plan-and-edit engine accepts: prompt for everything (default), auto-approve edits, read-only plan agent, or skip every check. Each provider alias below names the engine whose setting stores it. */
+export type SessionScopedPermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 
-export type ZcodePermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+/** How much Google Antigravity may do without asking; the settings dialog stores it under `antigravityPermissions`. */
+export type AntigravityPermissionMode = SessionScopedPermissionMode;
+
+/** How much OpenCode may do without asking; the settings dialog stores it under `opencodePermissions` and the OpenCode runtime maps it onto the plan agent and per-action ask rules. */
+export type OpencodePermissionMode = SessionScopedPermissionMode;
+
+/** How much ZCode may do without asking; the settings dialog stores it under `zcodePermissions`. */
+export type ZcodePermissionMode = SessionScopedPermissionMode;
 
 export type AuthStatus = ProviderAuthStatus;
 

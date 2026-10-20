@@ -39,6 +39,7 @@
  * through `applyServerEvent`, history through the fetch methods.
  */
 
+import { SessionEventReplay } from '@/modules/chat/utils/sessionEventReplay';
 import { isVolatileMessageId } from '@shared/protocol/messageKinds';
 import { authenticatedFetch } from '@/shared/api';
 import type { ActiveBackgroundTask, LLMProvider, NormalizedMessage, ServerEvent } from '@/shared/types';
@@ -142,6 +143,17 @@ export type SessionSlot = {
   backgroundWorkPending?: boolean;
   /** Client clock when the session last entered background waiting; set exactly while it waits. */
   backgroundWorkSince?: number;
+  /**
+   * False when the server said `chat.abort` can no longer stop this work (a
+   * ZCode agent outliving its turn); undefined means stoppable.
+   */
+  backgroundCanInterrupt?: boolean;
+  /**
+   * False when the server said a message sent during this work does not
+   * disturb it (Claude takes it as a turn of the held process); undefined
+   * means the message waits for the work.
+   */
+  backgroundWorkQueuesInput?: boolean;
 }
 
 const EMPTY: NormalizedMessage[] = [];
@@ -797,6 +809,8 @@ type ServerEventAction =
  * the seam between the two.
  */
 export type ServerEventDirective =
+  | { effect: 'replay_request'; sessionId: string }
+  | { effect: 'recover_stream'; sessionId: string; recoveryId: number }
   | {
       effect: 'chat_subscribed';
       sessionId: string;
@@ -827,6 +841,8 @@ export type ServerEventDirective =
   | { effect: 'permission_cancelled'; sessionId: string | null; requestId: string | null };
 
 export type ApplyServerEventOptions = {
+  /** Production receivers execute each directive before the next buffered event. */
+  onDirective?: (directive: ServerEventDirective) => void;
   /** Where frames without a sessionId attach (the actively viewed session). */
   fallbackSessionId?: string | null;
   /**
@@ -863,6 +879,10 @@ export class SessionTimelineStore {
     providerRowKey?: string;
   }>();
   private readonly resumeSeqs = new Map<string, number>();
+  // The transport ledger separates server watermarks from successfully applied events.
+  private readonly eventReplay = new SessionEventReplay();
+  // Observer notifications wait until the event's state and cursor commit.
+  private stagedNotifications: Set<string> | null = null;
 
   constructor(options: SessionTimelineStoreOptions = {}) {
     this.fetchPage = options.fetchPage ?? requestSessionHistoryPage;
@@ -870,6 +890,10 @@ export class SessionTimelineStore {
   }
 
   private notify(sessionId: string): void {
+    if (this.stagedNotifications) {
+      this.stagedNotifications.add(sessionId);
+      return;
+    }
     if (sessionId === this.activeSessionId) {
       this.notifyListener(sessionId);
     }
@@ -894,19 +918,129 @@ export class SessionTimelineStore {
    * The one entry point for server frames. Applies the frame's timeline state
    * — flush gate, upserts, appends, truncation, stream lifecycle, resume seq,
    * in the order this module's contracts require — and returns the side
-   * effects the handler owes the rest of the app. Frame ordering is the
-   * caller's responsibility: frames must arrive in server order.
+   * effects the handler owes the rest of the app. The transport ledger orders
+   * sequenced frames and calls onDirective between buffered events. The return
+   * value is the first directive; production receivers must use onDirective.
    */
   applyServerEvent(
     msg: ServerEvent,
     options: ApplyServerEventOptions = {},
   ): ServerEventDirective | null {
     const sid = readFrameSessionId(msg) || options.fallbackSessionId || null;
-    const provider = options.provider ?? 'claude';
+    let first: ServerEventDirective | null = null;
+    const emit = (directive: ServerEventDirective | null) => {
+      if (!directive) return;
+      first ??= directive;
+      options.onDirective?.(directive);
+    };
+    const apply = (event: ServerEvent) => this.stageEventState(event, options, emit);
+    if (sid) {
+      try {
+        if (this.eventReplay.receive(sid, msg, {
+          apply,
+          replay: () => emit({ effect: 'replay_request', sessionId: sid }),
+          recover: (recoveryId) => emit({ effect: 'recover_stream', sessionId: sid, recoveryId }),
+          resetStream: () => this.closeTransportStream(sid),
+        })) return first;
+      } catch (error) {
+        console.error(`[SessionStore] event processing failed for ${sid}:`, error);
+        throw error;
+      }
+    }
+    apply(msg)();
+    return first;
+  }
+
+  private stageEventState(msg: ServerEvent, options: ApplyServerEventOptions, emit: (directive: ServerEventDirective | null) => void): () => void {
+    const previous = this.stagedNotifications;
+    const notifications = new Set<string>();
+    this.stagedNotifications = notifications;
+    let directive: ServerEventDirective | null;
+    try {
+      directive = this.applyEventState(msg, options);
+    } finally {
+      this.stagedNotifications = previous;
+    }
+    return () => {
+      try {
+        for (const sessionId of notifications) this.notify(sessionId);
+      } finally {
+        emit(directive);
+      }
+    };
+  }
+
+  /** Recovery retry callbacks use this to avoid reviving an obsolete request. */
+  isEventRecoveryCurrent(sessionId: string, recoveryId: number): boolean {
+    return this.eventReplay.recovery(sessionId, recoveryId);
+  }
+
+  /** A local error card explains why later events are waiting; it is not engine history. */
+  setEventRecoveryError(sessionId: string, content: string | null, provider?: LLMProvider): void {
+    const id = `__replay_recovery_error_${sessionId}`;
+    if (content !== null) {
+      this.appendRealtime(sessionId, { id, sessionId, provider: this.slots.get(sessionId)?.realtimeMessages.at(-1)?.provider
+        ?? this.slots.get(sessionId)?.serverMessages.at(-1)?.provider ?? provider ?? 'claude',
+        timestamp: new Date().toISOString(), kind: 'error', content });
+      return;
+    }
+    const slot = this.slots.get(sessionId);
+    if (!slot || !slot.realtimeMessages.some(row => row.id === id)) return;
+    slot.realtimeMessages = slot.realtimeMessages.filter(row => row.id !== id);
+    recomputeMergedIfNeeded(slot);
+    this.notify(sessionId);
+  }
+
+  /** A new socket must establish its epoch through a fresh subscription ack. */
+  beginConnection(): void { this.eventReplay.beginConnection(); }
+
+  /** The chat subscription carries the namespace of its proven replay cursor. */
+  getStreamEpoch(sessionId: string): string | undefined { return this.eventReplay.epoch(sessionId); }
+
+  /** Shared by initial subscription, reconnect and gap recovery. */
+  getSubscriptionCursor(sessionId: string) {
+    const streamEpoch = this.getStreamEpoch(sessionId);
+    return { sessionId, lastSeq: this.getResumeSeq(sessionId), ...(streamEpoch ? { streamEpoch } : {}) };
+  }
+
+  /** Reconnect subscribes cached background conversations as well as the visible one. */
+  getKnownSessionIds(): string[] { return [...new Set([...this.slots.keys(), ...this.eventReplay.sessionIds()])]; }
+
+  private closeTransportStream(sessionId: string): void {
+    this.flushStream(sessionId);
+    this.finalizeStreaming(sessionId);
+    // The closed segment remains visible, but a later epoch/recovery segment
+    // cannot claim it solely because it was the most recent placeholder.
+    const slot = this.slots.get(sessionId);
+    if (slot) slot.streamingPlaceholderId = null;
+    this.accumulatedStreams.delete(sessionId);
+    const timer = this.streamTimers.get(sessionId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.streamTimers.delete(sessionId);
+  }
+
+  /** Restores an unreplayable gap from history before advancing its baseline. */
+  async recoverEventStream(sessionId: string, recoveryId: number, options: ApplyServerEventOptions = {}): Promise<void> {
+    if (!this.eventReplay.recovery(sessionId, recoveryId)) return;
+    const result = await this.refreshLatestFromServer(sessionId);
+    if (!this.eventReplay.recovery(sessionId, recoveryId)) return;
+    if (!result.applied) {
+      this.eventReplay.failRecovery(sessionId, recoveryId);
+      throw new Error(`History recovery failed for ${sessionId}`);
+    }
+    this.setEventRecoveryError(sessionId, null);
+    this.eventReplay.finishRecovery(sessionId, recoveryId,
+      (event) => this.stageEventState(event, options, (directive) => { if (directive) options.onDirective?.(directive); }),
+      () => options.onDirective?.({ effect: 'replay_request', sessionId }));
+  }
+
+  private applyEventState(msg: ServerEvent, options: ApplyServerEventOptions): ServerEventDirective | null {
+    const sid = readFrameSessionId(msg) || options.fallbackSessionId || null;
+    const provider = isNormalizedMessageEvent(msg) ? msg.provider ?? options.provider ?? 'claude' : options.provider ?? 'claude';
 
     // Replay progress first — before any routing (order-sensitive contract).
     const frameSeq = readFrameSeq(msg);
-    if (sid && frameSeq !== null) {
+    if (sid && frameSeq !== null && !('streamEpoch' in msg)) {
       this.noteSeq(sid, frameSeq);
     }
 
@@ -956,19 +1090,19 @@ export class SessionTimelineStore {
 
       case 'ack': {
         if (!sid || !isChatSubscribedEvent(msg)) return null;
-        // The ack's `lastSeq` is the server's per-session watermark (max-
-        // merged in, so the client's replay cursor can only move forward).
-        if (msg.lastSeq > 0) {
+        // Only legacy connections merge the ack watermark into their cursor.
+        // The epoch ledger advances through applied events or history recovery.
+        if (!('streamEpoch' in msg) && msg.lastSeq > 0) {
           this.noteSeq(sid, msg.lastSeq);
         }
         const ackBgTasks = Array.isArray(msg.backgroundTasks) ? msg.backgroundTasks : undefined;
         if (ackBgTasks) {
-          this.setBackgroundState(sid, ackBgTasks, msg.backgroundWorkPending);
+          this.setBackgroundState(sid, ackBgTasks, msg.backgroundWorkPending, msg.backgroundCanInterrupt, msg.backgroundWorkQueuesInput);
         }
         return {
           effect: 'chat_subscribed',
           sessionId: sid,
-          stale: msg.stale,
+          stale: !('streamEpoch' in msg) && msg.stale,
           isProcessing: msg.isProcessing,
           pendingPermissions: Array.isArray(msg.pendingPermissions)
             ? msg.pendingPermissions
@@ -1028,7 +1162,7 @@ export class SessionTimelineStore {
       case 'status': {
         const statusBgTasks = Array.isArray(message?.backgroundTasks) ? message.backgroundTasks : undefined;
         if (sid && statusBgTasks) {
-          this.setBackgroundState(sid, statusBgTasks, message?.backgroundWorkPending);
+          this.setBackgroundState(sid, statusBgTasks, message?.backgroundWorkPending, message?.canInterrupt, message?.backgroundWorkQueuesInput);
         }
         return {
           effect: 'status',
@@ -1755,7 +1889,7 @@ export class SessionTimelineStore {
 
   /** The `lastSeq` a `chat.subscribe` for this session should resume from. */
   getResumeSeq(sessionId: string): number {
-    return this.resumeSeqs.get(sessionId) ?? 0;
+    return this.getStreamEpoch(sessionId) ? this.eventReplay.cursor(sessionId) : this.resumeSeqs.get(sessionId) ?? 0;
   }
 
   /**
@@ -1840,11 +1974,23 @@ export class SessionTimelineStore {
     return Math.min(...slot.backgroundTasks.map((task) => task.startedAt));
   }
 
-  private setBackgroundState(sid: string, tasks: ActiveBackgroundTask[], pending: unknown): void {
+  /** Used by the viewed session's activity indicator to decide whether its background phase offers Stop. */
+  canInterruptBackgroundWork(sessionId: string): boolean {
+    return this.slots.get(sessionId)?.backgroundCanInterrupt !== false;
+  }
+
+  /** Used by the composer: whether a message sent during this session's background work has to wait for it. */
+  backgroundWorkQueuesInput(sessionId: string): boolean {
+    return this.slots.get(sessionId)?.backgroundWorkQueuesInput !== false;
+  }
+
+  private setBackgroundState(sid: string, tasks: ActiveBackgroundTask[], pending: unknown, canInterrupt: unknown, queuesInput: unknown): void {
     const slot = this.getSlot(sid);
     const wasPending = this.hasPendingBackgroundWork(sid);
     slot.backgroundTasks = tasks;
     slot.backgroundWorkPending = typeof pending === 'boolean' ? pending : undefined;
+    slot.backgroundCanInterrupt = typeof canInterrupt === 'boolean' ? canInterrupt : undefined;
+    slot.backgroundWorkQueuesInput = typeof queuesInput === 'boolean' ? queuesInput : undefined;
     if (!this.hasPendingBackgroundWork(sid)) {
       slot.backgroundWorkSince = undefined;
     } else if (!wasPending) {

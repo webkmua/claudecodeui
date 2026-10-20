@@ -67,6 +67,8 @@ type ChatComposerProps = {
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
   activity: SessionActivity | null;
   isLoading: boolean;
+  /** Whether Stop can act now; busy work nothing can stop (a ZCode agent past its turn) keeps the send button. */
+  canAbortSession: boolean;
   onAbortSession: () => void;
   onAbortBackgroundTasks: () => void;
   permissionMode: PermissionMode | string;
@@ -143,8 +145,24 @@ type ChatComposerProps = {
   sendByCtrlEnter?: boolean;
   backgroundTasks?: ActiveBackgroundTask[];
   hasActiveBackgroundTasks?: boolean;
+  /** Whether a new message has to be queued; see `isInputBlocked` in useChatSessionState. */
+  isInputBlocked?: boolean;
+  /** A reply is streaming, so anything sent waits for this turn to end. */
+  isReplyInFlight?: boolean;
+  /** Present only while a force send can be taken: the turn is over and only background work is waited on. */
   onForceSendQueuedDraft?: () => void;
 }
+
+/**
+ * Whether the composer offers the "send later" (定时发送) trigger.
+ *
+ * Off for now: the button sat right next to Send, and the scheduled-message
+ * flow was not used. The popover, the scheduling hook and the server-side
+ * dispatcher are all still in place, so flipping this back to `true` restores
+ * the entry point. Messages scheduled before it was switched off still show
+ * in the list above the input and are still sent on time.
+ */
+const SHOW_SCHEDULE_TRIGGER = false;
 
 function ChatComposer({
   pendingPermissionRequests,
@@ -152,6 +170,7 @@ function ChatComposer({
   handleGrantToolPermission,
   activity,
   isLoading,
+  canAbortSession,
   onAbortSession,
   onAbortBackgroundTasks,
   permissionMode,
@@ -220,6 +239,8 @@ function ChatComposer({
   sendByCtrlEnter = false,
   backgroundTasks = [],
   hasActiveBackgroundTasks = false,
+  isInputBlocked,
+  isReplyInFlight = false,
   onForceSendQueuedDraft,
 }: ChatComposerProps) {
   const { t } = useTranslation('chat');
@@ -287,8 +308,14 @@ function ChatComposer({
   const hasActivityIndicator = Boolean(activity && !hasPendingPermissions);
 
   const hasQueuedDraft = Boolean(queuedDraft);
-  const isBusy = isLoading || Boolean(hasActiveBackgroundTasks);
-  const canQueueDraft = isBusy && Boolean(input.trim() || attachedFiles.length > 0);
+  const isBusy = isInputBlocked ?? (isLoading || Boolean(hasActiveBackgroundTasks));
+  const hasDraftContent = Boolean(input.trim() || attachedFiles.length > 0);
+  // The button is Stop only when stopping can do something. Otherwise it stays
+  // the send button: disabled while the input is empty, queueing once typed.
+  // A typed message that nothing holds back (Claude's background phase) is
+  // sent by this button, so it is Send rather than Stop then.
+  const offersStop = isLoading && canAbortSession && !(hasDraftContent && !isBusy);
+  const canQueueDraft = isBusy && hasDraftContent;
   const submitHint = canQueueDraft
     ? hasQueuedDraft
       ? sendByCtrlEnter
@@ -309,7 +336,7 @@ function ChatComposer({
     ? hasQueuedDraft
       ? t('input.queue.update', { defaultValue: 'Update queued message' })
       : t('input.queue.sendNext', { defaultValue: 'Queue next message' })
-    : isLoading
+    : offersStop
       ? t('input.stop')
       : sendButtonLabel;
 
@@ -359,6 +386,8 @@ function ChatComposer({
       {hasActiveBackgroundTasks && backgroundTasks.length > 0 && (
         <BackgroundTaskIndicator
           tasks={backgroundTasks}
+          queuesInput={isBusy}
+          isReplyInFlight={isReplyInFlight}
           onAbort={backgroundTasks.every((task) => task.taskId) ? onAbortBackgroundTasks : undefined}
         />
       )}
@@ -371,8 +400,8 @@ function ChatComposer({
           }
           onEdit={onEditQueuedDraft}
           onDelete={onDeleteQueuedDraft}
-          onForceSend={hasActiveBackgroundTasks ? onForceSendQueuedDraft : undefined}
-          isWaitingForBackgroundTasks={Boolean(hasActiveBackgroundTasks)}
+          onForceSend={onForceSendQueuedDraft}
+          isWaitingForBackgroundTasks={Boolean(hasActiveBackgroundTasks) && !isReplyInFlight}
         />
       )}
 
@@ -420,7 +449,7 @@ function ChatComposer({
 
         <PromptInput
           onSubmit={onSubmit as (event: FormEvent<HTMLFormElement>) => void}
-          status={isLoading ? 'streaming' : 'ready'}
+          status={offersStop ? 'streaming' : 'ready'}
           className={[
             isTextareaExpanded ? 'chat-input-expanded' : '',
             hasActivityIndicator ? 'rounded-t-none' : '',
@@ -536,10 +565,12 @@ function ChatComposer({
               </div>
             )}
 
-            <ScheduleMessagePopover
-              disabled={!input.trim()}
-              onSchedule={onScheduleMessage}
-            />
+            {SHOW_SCHEDULE_TRIGGER && (
+              <ScheduleMessagePopover
+                disabled={!input.trim()}
+                onSchedule={onScheduleMessage}
+              />
+            )}
 
             <ComposerModelMenu
               effort={effort}
@@ -567,7 +598,7 @@ function ChatComposer({
                       e.preventDefault();
                       onSubmit(e);
                     }
-                  : isLoading
+                  : offersStop
                     ? onAbortSession
                     : isRecording
                       ? (e: MouseEvent<HTMLButtonElement>) => {
@@ -579,7 +610,7 @@ function ChatComposer({
               disabled={
                 isSubmitting
                   ? true
-                  : isLoading
+                  : offersStop
                     ? false
                     : isRecording
                       ? false

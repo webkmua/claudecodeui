@@ -5,7 +5,8 @@
  * frames the chat timeline already understands. Event names and payloads
  * are pinned to what v2.0.31 emits (captured live; see the tests' fixtures):
  *
- * - `session.text.delta` → `stream_delta`; `session.text.ended` → `stream_end`
+ * - `session.text.delta` → `stream_delta`; `session.text.ended` → the finished
+ *   `text` row (engine-named, so the streamed placeholder is adopted) + `stream_end`
  * - `session.reasoning.delta` → `thinking` deltas under one stable block id
  *   (the timeline appends same-id thinking frames, so deltas, not totals)
  * - `session.tool.input.started` / `tool.called` → `tool_use` snapshots that
@@ -14,19 +15,33 @@
  *   (`session.step.ended` carries token totals, but the runtime reads the
  *   authoritative session totals from the API snapshot instead)
  *
- * Ids on transcript rows (thinking / tool_use / tool_result) derive from the
- * engine's own identifiers (assistant message id + ordinal, tool call id) so
- * the same record never arrives under two ids. Unknown event types are
- * ignored on purpose: the service is young and adds events between patch
- * releases.
+ * Ids on transcript rows (text / thinking / tool_use / tool_result) derive
+ * from the engine's own identifiers (assistant message id + per-type part
+ * ordinal, tool call id) so the same record never arrives under two ids —
+ * the history reader renumbers its content blocks the same way. Unknown
+ * event types are ignored on purpose: the service is young and adds events
+ * between patch releases.
  *
  * @module opencode-event-translator
  */
 
+import { LOCAL_AGENT_TASK_TYPE, createTaskStatusMessage } from '@/modules/providers/shared/background-work/task-status.js';
 import type { NormalizedMessage } from '@/shared/types.js';
-import { createNormalizedMessage, readObjectRecord, readOptionalString } from '@/shared/utils.js';
+import {
+  compactProviderPayload,
+  createNormalizedMessage,
+  hasVisibleText,
+  readObjectRecord,
+  readOptionalString,
+} from '@/shared/utils.js';
 
 import type { OpenCodeEventEnvelope } from './opencode-event-stream.js';
+import {
+  isOpenCodeSubagentTool,
+  readSubagentChildSessionId,
+  toAgentCardInput,
+  toClientToolName,
+} from './opencode-subagent.js';
 
 const PROVIDER = 'opencode' as const;
 
@@ -75,8 +90,13 @@ const toTimestamp = (event: OpenCodeEventEnvelope): string => {
   return new Date(created).toISOString();
 };
 
-/** Joins the `content` blocks of a tool result (`[{type:'text', text}]`) into one string. */
-const formatToolOutput = (content: unknown): string => {
+/**
+ * Joins the `content` blocks of a tool result (`[{type:'text', text}]`) into one string.
+ *
+ * Consumers: this translator (live results) and the OpenCode history reader
+ * (persisted v2 tool states carry the same blocks under `content`).
+ */
+export const formatToolOutput = (content: unknown): string => {
   if (typeof content === 'string') {
     return content;
   }
@@ -115,6 +135,8 @@ export class OpenCodeSessionEventTranslator {
   private readonly toolCalls = new Map<string, OpenCodeToolCall>();
   /** Reasoning blocks that already streamed deltas; `reasoning.ended` must not repeat them. */
   private readonly streamedReasoningBlocks = new Set<string>();
+  /** Spawn calls announced but not yet resolved; each owns a card that must be settled. */
+  private readonly openSubagentCalls = new Set<string>();
 
   constructor(
     /** The app session id stamped on every frame (the writer owns provider↔app mapping). */
@@ -125,8 +147,21 @@ export class OpenCodeSessionEventTranslator {
     return this.toolCalls.get(callId) ?? null;
   }
 
+  /**
+   * Settles the card of every spawn call the run never resolved, as `stopped`.
+   *
+   * The runtime calls this once the run has ended for any reason (success,
+   * failure, interruption, a lost service), because a call whose result never
+   * arrived has nothing else to end its card: nobody is left to report on it.
+   */
+  settleOpenSubagents(): NormalizedMessage[] {
+    const frames = [...this.openSubagentCalls].map((callId) => this.subagentStatusFrame(callId, callId, 'stopped', new Date().toISOString()));
+    this.openSubagentCalls.clear();
+    return frames;
+  }
+
   translate(event: OpenCodeEventEnvelope): OpenCodeTranslatedEvent {
-    const data = readObjectRecord(event.data) ?? {};
+    const data = readObjectRecord(compactProviderPayload(event.data)) ?? {};
     const timestamp = toTimestamp(event);
     const messageId = readOptionalString(data.assistantMessageID) ?? 'message';
     const ordinal = toNumber(data.ordinal);
@@ -134,7 +169,9 @@ export class OpenCodeSessionEventTranslator {
     switch (event.type) {
       case 'session.text.delta': {
         const delta = readVerbatimString(data.delta);
-        if (!delta) {
+        // A delta carrying only invisible characters would otherwise sit in
+        // the client's streaming buffer and flush as a copy-control-only row.
+        if (!delta || !hasVisibleText(delta)) {
           return { frames: [] };
         }
         return {
@@ -149,16 +186,36 @@ export class OpenCodeSessionEventTranslator {
         };
       }
 
-      case 'session.text.ended':
-        return {
-          frames: [createNormalizedMessage({
-            id: `${messageId}_text_${ordinal}_end`,
+      case 'session.text.ended': {
+        // The finished segment must land as a real transcript row: the streamed
+        // deltas live in a client-side placeholder that only an engine-named
+        // row can retire, and the history reader derives the very same id
+        // (per-type ordinal within the message — see the v2 history flattener).
+        const text = readVerbatimString(data.text);
+        const frames: NormalizedMessage[] = [];
+        // Whitespace- or invisible-only bodies are skipped by the history
+        // reader too; a row for one would survive every refresh as an orphan
+        // with no persisted copy to retire it.
+        if (text && hasVisibleText(text)) {
+          frames.push(createNormalizedMessage({
+            id: `${messageId}_text_${ordinal}`,
             sessionId: this.sessionId,
             timestamp,
             provider: PROVIDER,
-            kind: 'stream_end',
-          })],
-        };
+            kind: 'text',
+            role: 'assistant',
+            content: text,
+          }));
+        }
+        frames.push(createNormalizedMessage({
+          id: `${messageId}_text_${ordinal}_end`,
+          sessionId: this.sessionId,
+          timestamp,
+          provider: PROVIDER,
+          kind: 'stream_end',
+        }));
+        return { frames };
+      }
 
       case 'session.reasoning.delta': {
         const delta = readVerbatimString(data.delta);
@@ -177,7 +234,7 @@ export class OpenCodeSessionEventTranslator {
           return { frames: [] };
         }
         const text = readVerbatimString(data.text);
-        if (!text?.trim()) {
+        if (!text || !hasVisibleText(text)) {
           return { frames: [] };
         }
         return { frames: [this.thinkingFrame(blockId, text, timestamp)] };
@@ -225,7 +282,11 @@ export class OpenCodeSessionEventTranslator {
         if (!callId) {
           return { frames: [] };
         }
-        return { frames: [this.toolResultFrame(callId, formatToolOutput(data.content), false, timestamp)] };
+        const frames = [this.toolResultFrame(callId, formatToolOutput(data.content), false, timestamp)];
+        if (this.openSubagentCalls.delete(callId)) {
+          frames.push(this.subagentStatusFrame(callId, readSubagentChildSessionId(data.metadata) ?? callId, 'completed', timestamp));
+        }
+        return { frames };
       }
 
       case 'session.tool.failed': {
@@ -233,7 +294,11 @@ export class OpenCodeSessionEventTranslator {
         if (!callId) {
           return { frames: [] };
         }
-        return { frames: [this.toolResultFrame(callId, readErrorMessage(data.error), true, timestamp)] };
+        const frames = [this.toolResultFrame(callId, readErrorMessage(data.error), true, timestamp)];
+        if (this.openSubagentCalls.delete(callId)) {
+          frames.push(this.subagentStatusFrame(callId, callId, 'failed', timestamp));
+        }
+        return { frames };
       }
 
       case 'session.step.ended':
@@ -274,17 +339,33 @@ export class OpenCodeSessionEventTranslator {
     });
   }
 
-  private toolUseFrame(callId: string, toolName: string, toolInput: unknown, timestamp: string): NormalizedMessage {
+  private toolUseFrame(callId: string, engineToolName: string, engineInput: unknown, timestamp: string): NormalizedMessage {
+    const isSubagent = isOpenCodeSubagentTool(engineToolName);
+    if (isSubagent) {
+      this.openSubagentCalls.add(callId);
+    }
     return createNormalizedMessage({
       id: callId,
       sessionId: this.sessionId,
       timestamp,
       provider: PROVIDER,
       kind: 'tool_use',
-      toolName,
-      toolInput,
+      toolName: toClientToolName(engineToolName),
+      toolInput: isSubagent ? toAgentCardInput(engineInput) : engineInput,
       toolId: callId,
     });
+  }
+
+  private subagentStatusFrame(
+    callId: string,
+    taskId: string,
+    status: 'completed' | 'failed' | 'stopped',
+    timestamp: string,
+  ): NormalizedMessage {
+    return createTaskStatusMessage(
+      { provider: PROVIDER, sessionId: this.sessionId, taskId, toolUseId: callId, taskType: LOCAL_AGENT_TASK_TYPE },
+      { id: `${callId}_status`, timestamp, event: 'notification', status },
+    );
   }
 
   private toolResultFrame(callId: string, content: string, isError: boolean, timestamp: string): NormalizedMessage {

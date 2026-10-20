@@ -10,13 +10,18 @@ import type {
   FetchHistoryOptions,
   FetchHistoryResult,
   NormalizedMessage,
+  SubagentActivity,
+  SubagentInfo,
   ProviderSessionUsageInput,
   ProviderTokenUsageResult,
 } from '@/shared/types.js';
 import {
+  ProviderDisplayAssetError,
+  compactProviderPayload,
   AppError,
   createNormalizedMessage,
   generateMessageId,
+  hasVisibleText,
   normalizeProjectPath,
   normalizeProviderTimestamp,
   readObjectRecord,
@@ -25,15 +30,24 @@ import {
   readUsageNumber,
   removePathIfExists,
   sliceTailPage,
+  truncateSubagentActivity,
   unwrapJsonStringLiteral,
 } from '@/shared/utils.js';
 
+import { formatToolOutput } from './opencode-event-translator.js';
 import {
   getOpenCodeDatabasePath,
+  readOpenCodeSessionIdleAt,
   readOpenCodeSessionTokenTotals,
   resolveOpenCodeMessageLayout,
   resolveOpenCodeSessionTableName,
 } from './opencode-data-root.js';
+import {
+  isOpenCodeSubagentTool,
+  readSubagentChildSessionId,
+  toAgentCardInput,
+  toClientToolName,
+} from './opencode-subagent.js';
 
 const PROVIDER = 'opencode';
 
@@ -44,6 +58,18 @@ type OpenCodeHistoryRow = {
   part_id: string | null;
   part_time_created: number | null;
   part_data: string | null;
+};
+
+/**
+ * What the history normalizer needs beyond the rows themselves: the open
+ * database (a spawn call's child session is read from it) and the layout
+ * that tells how to read that child.
+ */
+type OpenCodeHistoryContext = {
+  db: Database.Database;
+  layout: 'session_message' | 'message_part';
+  /** The session being read, whose idle time says whether a call left `running` can still finish. */
+  providerSessionId: string;
 };
 
 type OpenCodeTokenTotals = {
@@ -146,16 +172,16 @@ const readOpenCodeSessionColumnTokenUsage = (
  * message plus one virtual part per block. Compaction, idle, and system rows
  * carry no user-visible transcript content and are skipped.
  */
-const flattenOpenCodeV2HistoryRows = (
+function* flattenOpenCodeV2HistoryRows(
   db: Database.Database,
   sessionId: string,
-): OpenCodeHistoryRow[] => {
+): Generator<OpenCodeHistoryRow> {
   const messageRows = db.prepare(`
     SELECT id, type, time_created, time_updated, data
     FROM session_message
     WHERE session_id = ?
     ORDER BY seq
-  `).all(sessionId) as Array<{
+  `).iterate(sessionId) as Iterable<{
     id: string;
     type: string;
     time_created: number | null;
@@ -163,48 +189,58 @@ const flattenOpenCodeV2HistoryRows = (
     data: string;
   }>;
 
-  const rows: OpenCodeHistoryRow[] = [];
   for (const messageRow of messageRows) {
     if (messageRow.type !== 'user' && messageRow.type !== 'assistant') {
       continue;
     }
 
-    const data = readJsonRecord(messageRow.data) ?? {};
+    const data: AnyRecord = compactProviderPayload({ ...(readJsonRecord(messageRow.data) ?? {}), role: messageRow.type });
     // Part rows repeat the message payload (the v1 join did too) so the
     // normalizer can read the role off every row.
     const messageData = JSON.stringify({ role: messageRow.type, error: data.error ?? null });
-    rows.push({
+    yield {
       message_id: messageRow.id,
       message_time_created: messageRow.time_created,
       message_data: messageData,
       part_id: null,
       part_time_created: null,
       part_data: null,
-    });
+    };
 
     if (messageRow.type === 'user') {
-      rows.push({
+      yield {
         message_id: messageRow.id,
         message_time_created: messageRow.time_created,
         message_data: messageData,
         part_id: `${messageRow.id}_text`,
         part_time_created: messageRow.time_created,
         part_data: JSON.stringify({ type: 'text', text: readOptionalString(data.text) ?? '' }),
-      });
+      };
       continue;
     }
 
     const content = Array.isArray(data.content) ? data.content : [];
-    content.forEach((block, index) => {
+    // The SSE stream names a part `${messageID}_text_${ordinal}` /
+    // `${messageID}_reasoning_${ordinal}`, where ordinal counts that type's
+    // parts within the message (the engine initializes the counter per
+    // message). Renumber blocks the same way so both transports name one
+    // record identically — the timeline deduplicates on that id.
+    let textOrdinal = 0;
+    let reasoningOrdinal = 0;
+    for (const [index, block] of content.entries()) {
       const blockRecord = readObjectRecord(block);
       if (!blockRecord) {
-        return;
+        continue;
       }
 
       const blockType = readOptionalString(blockRecord.type);
       let partData: Record<string, unknown> | null = null;
+      let partId = `${messageRow.id}_${index}`;
       if (blockType === 'text' || blockType === 'reasoning') {
         partData = { type: blockType, text: readOptionalString(blockRecord.text) ?? '' };
+        partId = blockType === 'text'
+          ? `text_${textOrdinal++}`
+          : `reasoning_${reasoningOrdinal++}`;
       } else if (blockType === 'tool') {
         partData = {
           type: 'tool',
@@ -214,22 +250,20 @@ const flattenOpenCodeV2HistoryRows = (
         };
       }
       if (!partData) {
-        return;
+        continue;
       }
 
-      rows.push({
+      yield {
         message_id: messageRow.id,
         message_time_created: messageRow.time_created,
         message_data: messageData,
-        part_id: `${messageRow.id}_${index}`,
+        part_id: partId,
         part_time_created: messageRow.time_updated ?? messageRow.time_created,
         part_data: JSON.stringify(partData),
-      });
-    });
+      };
+    }
   }
-
-  return rows;
-};
+}
 
 /**
  * OpenCode stores per-message token counts on assistant `message.data` objects
@@ -245,7 +279,7 @@ const aggregateOpenCodeSessionTokenUsage = (
     return sessionColumnUsage;
   }
 
-  const rows = db.prepare('SELECT data FROM message WHERE session_id = ?').all(sessionId) as { data: string }[];
+  const rows = db.prepare('SELECT data FROM message WHERE session_id = ?').iterate(sessionId) as Iterable<{ data: string }>;
 
   let inputTokens = 0;
   let outputTokens = 0;
@@ -290,7 +324,7 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
    * v1 carried the fields on the event itself; both shapes are read.
    */
   normalizeMessage(rawMessage: unknown, sessionId: string | null): NormalizedMessage[] {
-    const raw = readObjectRecord(rawMessage);
+    const raw = readObjectRecord(compactProviderPayload(rawMessage));
     if (!raw) {
       return [];
     }
@@ -313,7 +347,7 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
       }
 
       const content = extractText(raw.text ?? raw.delta ?? raw.message ?? part?.text);
-      if (!content.trim()) {
+      if (!hasVisibleText(content)) {
         return [];
       }
 
@@ -329,7 +363,7 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
 
     if (type === 'reasoning') {
       const content = extractText(raw.text ?? raw.delta ?? raw.message ?? part?.text);
-      if (!content.trim()) {
+      if (!hasVisibleText(content)) {
         return [];
       }
 
@@ -436,11 +470,21 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
         ? buildTokenUsage(readOpenCodeSessionTokenTotals(db, providerSessionId) ?? undefined)
         : aggregateOpenCodeSessionTokenUsage(db, providerSessionId);
 
-      const normalized = this.normalizeHistoryRows(rows, sessionId);
       const normalizedOffset = Math.max(0, offset);
       const normalizedLimit = limit === null ? null : Math.max(0, limit);
-      const total = normalized.length;
-      const { page, hasMore } = sliceTailPage(normalized, normalizedLimit, normalizedOffset);
+      const capacity = normalizedLimit === null ? Infinity : normalizedOffset + normalizedLimit;
+      const window: NormalizedMessage[] = [];
+      let total = 0;
+      let head = 0;
+      for (const message of this.normalizeHistoryRows(rows, sessionId, { db, layout, providerSessionId })) {
+        total += 1;
+        if (capacity === 0) continue;
+        if (window.length < capacity) window.push(message);
+        else { window[head] = message; head = (head + 1) % capacity; }
+      }
+      const ordered = head === 0 ? window : [...window.slice(head), ...window.slice(0, head)];
+      const { page } = sliceTailPage(ordered, normalizedLimit, normalizedOffset);
+      const hasMore = normalizedLimit !== null && total > normalizedOffset + normalizedLimit;
 
       return {
         messages: page,
@@ -451,6 +495,7 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
         tokenUsage,
       };
     } catch (error) {
+      if (error instanceof ProviderDisplayAssetError) throw error;
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[OpenCodeProvider] Failed to load session ${sessionId}:`, message);
       return { messages: [], total: 0, hasMore: false, offset: 0, limit: null };
@@ -460,7 +505,7 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
   }
 
   /** The v1 message+part layout query, kept for databases predating v2. */
-  private readV1HistoryRows(db: Database.Database, providerSessionId: string): OpenCodeHistoryRow[] {
+  private readV1HistoryRows(db: Database.Database, providerSessionId: string): Iterable<OpenCodeHistoryRow> {
     return db.prepare(`
       SELECT
         m.id AS message_id,
@@ -479,17 +524,21 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
         m.id,
         COALESCE(p.time_created, 0),
         p.id
-    `).all(providerSessionId) as OpenCodeHistoryRow[];
+    `).iterate(providerSessionId) as Iterable<OpenCodeHistoryRow>;
   }
 
-  private normalizeHistoryRows(rows: OpenCodeHistoryRow[], sessionId: string): NormalizedMessage[] {
-    const normalized: NormalizedMessage[] = [];
+  private *normalizeHistoryRows(
+    rows: Iterable<OpenCodeHistoryRow>,
+    sessionId: string,
+    context: OpenCodeHistoryContext,
+  ): Generator<NormalizedMessage> {
+    let rowOrdinal = 0;
     const emittedMessageErrors = new Set<string>();
 
     for (const row of rows) {
       const timestamp = normalizeProviderTimestamp(row.part_time_created ?? row.message_time_created);
-      const baseId = `${row.message_id}_${row.part_id ?? normalized.length}`;
-      const messageInfo = readJsonRecord(row.message_data);
+      const baseId = `${row.message_id}_${row.part_id ?? rowOrdinal++}`;
+      const messageInfo = compactProviderPayload(readJsonRecord(row.message_data));
       const messageRole = readOptionalString(messageInfo?.role);
 
       if (
@@ -499,21 +548,22 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
         && !emittedMessageErrors.has(row.message_id)
       ) {
         emittedMessageErrors.add(row.message_id);
-        normalized.push(createNormalizedMessage({
+        yield createNormalizedMessage({
           id: `${baseId}_error`,
           sessionId,
           timestamp,
           provider: PROVIDER,
           kind: 'error',
           content: formatToolContent(messageInfo.error),
-        }));
+        });
       }
 
       if (!row.part_id) {
         continue;
       }
 
-      const partData = readJsonRecord(row.part_data) ?? {};
+      const rawPartData = readJsonRecord(row.part_data);
+      const partData = compactProviderPayload(rawPartData && messageRole === 'user' ? { ...rawPartData, role: 'user' } : rawPartData) ?? {};
       const partType = readOptionalString(partData.type);
       if (!partType) {
         continue;
@@ -530,11 +580,11 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
           ? parseFilesInputTag(parsedImages.text)
           : { text: rawContent, attachments: [] };
         if (
-          parsedFiles.text.trim()
+          hasVisibleText(parsedFiles.text)
           || parsedImages.attachments.length > 0
           || parsedFiles.attachments.length > 0
         ) {
-          normalized.push(createNormalizedMessage({
+          yield createNormalizedMessage({
             id: baseId,
             sessionId,
             timestamp,
@@ -544,22 +594,22 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
             content: parsedFiles.text,
             images: parsedImages.attachments.length > 0 ? parsedImages.attachments : undefined,
             files: parsedFiles.attachments.length > 0 ? parsedFiles.attachments : undefined,
-          }));
+          });
         }
         continue;
       }
 
       if (partType === 'reasoning') {
         const content = extractText(partData);
-        if (content.trim()) {
-          normalized.push(createNormalizedMessage({
+        if (hasVisibleText(content)) {
+          yield createNormalizedMessage({
             id: baseId,
             sessionId,
             timestamp,
             provider: PROVIDER,
             kind: 'thinking',
             content,
-          }));
+          });
         }
         continue;
       }
@@ -567,54 +617,150 @@ export class OpenCodeSessionsProvider implements IProviderSessions {
       if (partType === 'tool') {
         const state = readObjectRecord(partData.state) ?? {};
         const status = readOptionalString(state.status);
+        const engineToolName = readOptionalString(partData.tool) ?? 'Tool';
+        const isSubagent = isOpenCodeSubagentTool(engineToolName);
+        const engineInput = state.input ?? partData.input ?? {};
         const toolMessage = createNormalizedMessage({
           id: baseId,
           sessionId,
           timestamp,
           provider: PROVIDER,
           kind: 'tool_use',
-          toolName: readOptionalString(partData.tool) ?? 'Tool',
-          toolInput: state.input ?? partData.input ?? {},
+          toolName: toClientToolName(engineToolName),
+          toolInput: isSubagent ? toAgentCardInput(engineInput) : engineInput,
           toolId: readOptionalString(partData.callID) ?? row.part_id,
         });
 
         if (status === 'completed' || status === 'error') {
+          // v1 states carry the output as a string; v2 states carry result
+          // blocks under `content`.
+          const output = state.output ?? (state.content === undefined ? undefined : formatToolOutput(state.content));
           toolMessage.toolResult = {
-            content: formatToolContent(state.output ?? state.error),
+            content: formatToolContent(output ?? state.error),
             isError: status === 'error',
           };
         }
 
-        normalized.push(toolMessage);
+        if (isSubagent) {
+          this.attachSubagent(toolMessage, state, engineInput, row.part_time_created ?? row.message_time_created, context);
+        }
+
+        yield toolMessage;
         continue;
       }
 
       if (partType === 'step-finish') {
-        normalized.push(createNormalizedMessage({
+        yield createNormalizedMessage({
           id: baseId,
           sessionId,
           timestamp,
           provider: PROVIDER,
           kind: 'stream_end',
-        }));
+        });
         continue;
       }
 
-      if (partType === 'patch' || partType === 'agent') {
-        normalized.push(createNormalizedMessage({
+      // An `agent` part is the user's @-mention of an agent, not a spawn (the
+      // prompt text already holds the mention), so it draws nothing.
+      if (partType === 'patch') {
+        yield createNormalizedMessage({
           id: baseId,
           sessionId,
           timestamp,
           provider: PROVIDER,
           kind: 'tool_use',
-          toolName: partType === 'patch' ? 'Patch' : 'Agent',
+          toolName: 'Patch',
           toolInput: partData,
           toolId: row.part_id,
-        }));
+        });
       }
     }
 
-    return normalized;
+  }
+
+  /**
+   * Publishes a spawn call's outcome and its child session's work on its
+   * `Agent` row.
+   *
+   * The call's own status is the agent's outcome (`completed`, `error`). A
+   * call persisted as `pending` or `running` can only still be running while
+   * the session has a run in flight; once the session is idle the run that
+   * owned the call is gone and the agent can never finish, so it reads as
+   * `stopped`.
+   */
+  private attachSubagent(
+    toolMessage: NormalizedMessage,
+    state: AnyRecord,
+    engineInput: unknown,
+    callTime: number | null,
+    context: OpenCodeHistoryContext,
+  ): void {
+    const input = readObjectRecord(engineInput);
+    const childSessionId = readSubagentChildSessionId(state.metadata)
+      ?? readOptionalString(input?.sessionID);
+    const agentType = readOptionalString(input?.agent);
+    const description = readOptionalString(input?.description);
+    const subagent: SubagentInfo = {
+      id: childSessionId ?? String(toolMessage.toolId),
+      name: agentType,
+      type: agentType,
+      description,
+      status: this.resolveSubagentStatus(readOptionalString(state.status), callTime, context),
+    };
+
+    if (childSessionId) {
+      const activity = this.readChildSessionActivity(childSessionId, context);
+      if (activity.length > 0) {
+        toolMessage.subagentTools = activity.map(truncateSubagentActivity);
+        subagent.activityCount = activity.length;
+      }
+    }
+    toolMessage.subagent = subagent;
+  }
+
+  private resolveSubagentStatus(
+    callStatus: string | undefined,
+    callTime: number | null,
+    context: OpenCodeHistoryContext,
+  ): SubagentInfo['status'] {
+    if (callStatus === 'completed') {
+      return 'completed';
+    }
+    if (callStatus === 'error') {
+      return 'failed';
+    }
+    const idleAt = readOpenCodeSessionIdleAt(context.db, context.providerSessionId);
+    // `undefined`: this database cannot say whether a run is in flight, so a
+    // call left unresolved is not claimed to be running. `null`: a run is
+    // still in flight. A number: the session went idle at that time, which
+    // ends every call begun before it.
+    const stillInFlight = idleAt === null || (idleAt !== undefined && (callTime ?? 0) > idleAt);
+    return stillInFlight ? 'running' : 'stopped';
+  }
+
+  /** The child session's text, reasoning and tool calls as a subagent timeline. */
+  private readChildSessionActivity(childSessionId: string, context: OpenCodeHistoryContext): SubagentActivity[] {
+    const rows = context.layout === 'session_message'
+      ? flattenOpenCodeV2HistoryRows(context.db, childSessionId)
+      : this.readV1HistoryRows(context.db, childSessionId);
+    const activity: SubagentActivity[] = [];
+    for (const message of this.normalizeHistoryRows(rows, childSessionId, { ...context, providerSessionId: childSessionId })) {
+      if (message.kind === 'tool_use') {
+        activity.push({
+          kind: 'tool',
+          timestamp: message.timestamp,
+          toolId: message.toolId,
+          toolName: message.toolName,
+          toolInput: message.toolInput,
+          toolResult: message.toolResult ?? null,
+        });
+      } else if (message.kind === 'text' && message.role !== 'user') {
+        activity.push({ kind: 'text', timestamp: message.timestamp, content: message.content });
+      } else if (message.kind === 'thinking') {
+        activity.push({ kind: 'thinking', timestamp: message.timestamp, content: message.content });
+      }
+    }
+    return activity;
   }
 
   /**

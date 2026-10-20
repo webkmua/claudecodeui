@@ -55,6 +55,12 @@ type UseChatComposerStateArgs = {
   currentProviderModel: string;
   currentProviderEffort: string;
   isLoading: boolean;
+  /**
+   * Whether a new message has to wait (be queued). Defaults to "busy at all";
+   * the chat passes false during background work whose runtime takes the next
+   * turn alongside it (Claude's held process).
+   */
+  isInputBlocked?: boolean;
   backgroundTasks?: ActiveBackgroundTask[];
   hasActiveBackgroundTasks?: boolean;
   processingSessions?: SessionActivityMap;
@@ -250,6 +256,7 @@ export function useChatComposerState({
   currentProviderModel,
   currentProviderEffort,
   isLoading,
+  isInputBlocked,
   backgroundTasks = [],
   hasActiveBackgroundTasks = false,
   processingSessions,
@@ -809,7 +816,7 @@ export function useChatComposerState({
         // A turn or background work is already in flight: stash this message instead of sending it.
         // Upload attached files now so the queued record contains durable image
         // descriptors that can be sent even if another session is open later.
-        const isBusy = isLoading || Boolean(hasActiveBackgroundTasks);
+        const isBusy = isInputBlocked ?? (isLoading || Boolean(hasActiveBackgroundTasks));
         if (isBusy && !isForced) {
           // A run can restart in the tiny gap between scheduling and flushing a
           // queued submission. Put the same durable draft back without uploading
@@ -1033,6 +1040,7 @@ export function useChatComposerState({
       currentSessionId,
       executeCommand,
       isLoading,
+      isInputBlocked,
       hasActiveBackgroundTasks,
       onSessionProcessing,
       onSessionEstablished,
@@ -1056,7 +1064,7 @@ export function useChatComposerState({
   // Once the in-flight turn ends, replay the queued draft through the normal
   // submit path. The draft itself is passed directly so submission never
   // depends on React committing restored attachment state first.
-  const isBusy = isLoading || Boolean(hasActiveBackgroundTasks);
+  const isBusy = isInputBlocked ?? (isLoading || Boolean(hasActiveBackgroundTasks));
   const wasBusyRef = useRef(isBusy);
   const flushSessionKeyRef = useRef(sessionKey);
   useEffect(() => {
@@ -1120,6 +1128,13 @@ export function useChatComposerState({
   const deleteQueuedDraft = useCallback(() => {
     setQueuedDraft(null);
   }, []);
+
+  // Force send starts a new run, which the server refuses while a reply is
+  // still in flight (RUN_IN_PROGRESS); only a session whose turn has ended
+  // and that waits on background work alone can take one.
+  const queueTargetActivity = processingSessions?.get(selectedSession?.id || currentSessionId || '');
+  const canForceSendQueuedDraft = Boolean(hasActiveBackgroundTasks)
+    && !(queueTargetActivity && !queueTargetActivity.background);
 
   const forceSendQueuedDraft = useCallback(() => {
     if (!queuedDraft) {
@@ -1463,6 +1478,7 @@ export function useChatComposerState({
     editQueuedDraft,
     deleteQueuedDraft,
     forceSendQueuedDraft,
+    canForceSendQueuedDraft,
     backgroundTasks,
     hasActiveBackgroundTasks,
     handleVoiceTranscript,

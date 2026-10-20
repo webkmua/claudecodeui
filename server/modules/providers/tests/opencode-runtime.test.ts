@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { after, before } from 'node:test';
 
-import { closeConnection, initializeDatabase } from '@/modules/database/index.js';
+import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { connectedClients } from '@/modules/websocket/index.js';
 import { createOpenCodeRuntime } from '@/modules/providers/list/opencode/opencode-runtime.provider.js';
 import type { NormalizedMessage, ProviderModelsDefinition, ProviderRuntimeContext } from '@/shared/types.js';
 
@@ -148,6 +149,27 @@ const session = (type: string, data: Record<string, unknown>) => ({
   id: `evt_${type}_${Math.random()}`, created: Date.now(), type, data: { sessionID: 'ses_new', ...data },
 });
 
+/**
+ * Waits until the assertion holds.
+ *
+ * The runtime handles an engine event in the background, so the effect of the
+ * event shows up a tick after the test pushed it into the feed.
+ */
+const waitFor = async (assertion: () => void, timeoutMs = 2_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      if (Date.now() > deadline) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+};
+
 const withRuntime = async (run: (input: { service: FakeService; runtime: ReturnType<typeof createOpenCodeRuntime> }) => Promise<void>) => {
   const service = await startFakeService();
   const endpoint = { url: service.url, authorization: 'Basic dGVzdA==' };
@@ -190,7 +212,10 @@ test('first send creates the session in the project directory, applies mode and 
       ['POST', '/api/session/ses_new/prompt'],
       ['GET', '/api/session/ses_new'],
     ]);
-    assert.deepEqual(service.requests[0].body, { location: { directory: '/tmp/project-a' }, title: 'Greeting' });
+    assert.deepEqual(service.requests[0].body, { location: { directory: '/tmp/project-a' } });
+    // No title on the create request: the engine only names a session while it
+    // still carries the placeholder it falls back to, and a title handed in
+    // here would occupy that placeholder for good.
     assert.deepEqual(service.requests[1].body, { agent: 'build' });
     assert.deepEqual(service.requests[2].body, {
       permissions: ['shell', 'edit', 'write', 'patch'].map((action) => ({ action, resource: '*', effect: 'ask' })),
@@ -199,13 +224,88 @@ test('first send creates the session in the project directory, applies mode and 
     assert.deepEqual(service.requests[4].body, { text: 'hello there' });
 
     assert.deepEqual(sessionIds, ['ses_new']);
-    assert.deepEqual(frames.map((frame) => frame.kind), ['session_created', 'stream_delta', 'stream_end', 'status', 'complete']);
+    assert.deepEqual(frames.map((frame) => frame.kind), ['session_created', 'stream_delta', 'text', 'stream_end', 'status', 'complete']);
     assert.equal(frames[0].newSessionId, 'ses_new');
     assert.equal(frames[1].content, 'Hi!');
     assert.equal(frames[1].sessionId, 'app-1');
-    assert.deepEqual(frames[3].tokenBudget, { used: 18, inputTokens: 12, outputTokens: 5, breakdown: { input: 12, output: 5 } });
-    assert.equal(frames[4].success, true);
-    assert.equal(frames[4].exitCode, 0);
+    // The finished text row carries the engine-derived id the history reader
+    // will re-derive, so the streamed placeholder is adopted and later
+    // refreshes cannot render the reply twice.
+    assert.equal(frames[2].id, 'msg_a_text_0');
+    assert.equal(frames[2].role, 'assistant');
+    assert.equal(frames[2].content, 'Hi!');
+    assert.deepEqual(frames[4].tokenBudget, { used: 18, inputTokens: 12, outputTokens: 5, breakdown: { input: 12, output: 5 } });
+    assert.equal(frames[5].success, true);
+    assert.equal(frames[5].exitCode, 0);
+  });
+});
+
+test('the name the engine generated reaches the app row and is announced as a name-only update', async () => {
+  const sent: unknown[] = [];
+  const connection = {
+    readyState: 1,
+    send: (payload: string) => { sent.push(JSON.parse(payload)); },
+  };
+  connectedClients.add(connection as never);
+  try {
+    await withRuntime(async ({ service, runtime }) => {
+      // The row the chat run leaves behind: the app's own session, mapped to
+      // the engine's session id, still carrying the first message as its name.
+      sessionsDb.createAppSession('app-1', 'opencode', '/tmp/project-a', 'The first message');
+      sessionsDb.assignProviderSessionId('app-1', 'ses_new');
+
+      // A chat has to have run for the runtime to be listening to the
+      // engine's event feed, which is where the name arrives.
+      const { writer } = makeWriter();
+      const running = runtime.run('hello', { sessionId: 'app-1', projectPath: '/tmp/project-a' }, writer, makeContext('ses_new'));
+      await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+      service.emit(session('session.execution.succeeded', {}));
+      await running;
+
+      service.emit({
+        id: 'evt_renamed',
+        created: 1_700_000_009_000,
+        type: 'session.renamed',
+        data: { sessionID: 'ses_new', title: 'The name the engine chose' },
+      });
+
+      await waitFor(() => {
+        assert.equal(sessionsDb.getSessionById('app-1')?.custom_name, 'The name the engine chose');
+      });
+
+      const upserts = sent.filter((payload): payload is { kind: string; metadataOnly?: boolean; session: { summary: string } } =>
+        (payload as { kind?: string }).kind === 'session_upserted');
+      assert.equal(upserts.length, 1);
+      assert.equal(upserts[0].metadataOnly, true);
+      assert.equal(upserts[0].session.summary, 'The name the engine chose');
+    });
+  } finally {
+    connectedClients.delete(connection as never);
+  }
+});
+
+test('a name the user chose is not replaced by the engine', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    sessionsDb.createAppSession('app-locked', 'opencode', '/tmp/project-a', 'The name I chose');
+    sessionsDb.assignProviderSessionId('app-locked', 'ses_new');
+    sessionsDb.updateSessionCustomName('app-locked', 'The name I chose', { lockName: true });
+
+    const { writer } = makeWriter();
+    const running = runtime.run('hello', { sessionId: 'app-locked', projectPath: '/tmp/project-a' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+
+    service.emit({
+      id: 'evt_renamed',
+      created: 1_700_000_009_000,
+      type: 'session.renamed',
+      data: { sessionID: 'ses_new', title: 'The name the engine chose' },
+    });
+
+    await waitFor(() => {
+      assert.equal(sessionsDb.getSessionById('app-locked')?.custom_name, 'The name I chose');
+    });
   });
 });
 
@@ -291,6 +391,8 @@ test('a permission card answered through the facet reaches the service and is re
     const permissionFrames = frames.filter((frame) => frame.kind.startsWith('permission_')).map((frame) => frame.kind);
     assert.deepEqual(permissionFrames, ['permission_request', 'permission_resolved']);
     assert.equal(frames.find((frame) => frame.kind === 'permission_request')?.toolName, 'shell');
+    const mainCard = frames.find((frame) => frame.kind === 'permission_request');
+    assert.equal((mainCard?.context as { subagent?: unknown } | undefined)?.subagent, undefined, 'a main-thread card names no subagent');
   });
 });
 
@@ -347,4 +449,233 @@ test('attachments ride along as data-URI file parts next to the path tags', asyn
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('a run that ends on an unfinished subagent call settles the card as stopped before it completes', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer, frames } = makeWriter();
+    const running = runtime.run('delegate', { sessionId: 'app-1', projectPath: '/tmp/p' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+    service.emit(session('session.tool.called', {
+      assistantMessageID: 'm', id: 'call-sub', name: 'subagent',
+      input: { agent: 'general', description: 'Review', prompt: 'go' },
+    }));
+    service.emit(session('session.execution.interrupted', { reason: 'user' }));
+    await running;
+
+    const launch = frames.find((frame) => frame.kind === 'tool_use');
+    assert.equal(launch?.toolName, 'Agent');
+    const settle = frames.find((frame) => frame.kind === 'task_status');
+    assert.equal(settle?.toolUseId, 'call-sub');
+    assert.equal(settle?.status, 'stopped');
+    assert.ok(frames.indexOf(settle!) < frames.findIndex((frame) => frame.kind === 'complete' || frame.kind === 'status'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Child sessions: the events and requests of a subagent's own session belong
+// to the root run (shapes captured from OpenCode 2.0.31).
+// ---------------------------------------------------------------------------
+
+const CHILD = 'ses_child';
+const GRANDCHILD = 'ses_grandchild';
+const SPAWN_CALL = 'call_spawn';
+
+const spawnChild = (service: FakeService, options: { child?: string; parent?: string; call?: string } = {}) => {
+  const child = options.child ?? CHILD;
+  const parent = options.parent ?? 'ses_new';
+  const call = options.call ?? SPAWN_CALL;
+  service.emit(session('session.tool.called', {
+    sessionID: parent, assistantMessageID: 'm_p', id: call, name: 'subagent',
+    input: { agent: 'general', description: 'Create the file', prompt: 'make probe.txt' },
+  }));
+  service.emit(session('session.created', { sessionID: child, parentID: parent, title: 'Create the file' }));
+  service.emit(session('session.tool.progress', { sessionID: parent, assistantMessageID: 'm_p', id: call, metadata: { sessionID: child, status: 'running' } }));
+};
+
+test('a subagent\'s permission request reaches the page under the parent session and is answered on the child session', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer, frames } = makeWriter();
+    const running = runtime.run('delegate', { sessionId: 'app-1', projectPath: '/tmp/p', permissionMode: 'default' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+
+    spawnChild(service);
+    service.emit(session('session.tool.called', { sessionID: CHILD, assistantMessageID: 'm_c', id: 'call_shell', name: 'shell', input: { command: 'echo hi' } }));
+    service.emit({ type: 'permission.asked', data: { id: 'per_child', sessionID: CHILD, action: 'shell', resources: ['echo hi'], source: { type: 'tool', messageID: 'm_c', id: 'call_shell' } } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const card = frames.find((frame) => frame.kind === 'permission_request');
+    assert.ok(card, 'the approval card must reach the writer');
+    assert.equal(card.requestId, 'per_child');
+    assert.equal(card.sessionId, 'app-1');
+    assert.equal(card.toolName, 'shell', 'labelled by the child\'s own tool call');
+    assert.deepEqual((card.context as { subagent?: unknown }).subagent, { toolUseId: SPAWN_CALL, description: 'Create the file' });
+    assert.equal(runtime.permissions?.listPending('app-1').length, 1);
+
+    runtime.permissions?.resolve('per_child', { allow: true });
+    const reply = await service.waitForRequest((request) => request.path.endsWith('/permission/per_child/reply'));
+    assert.equal(reply.path, `/api/session/${CHILD}/permission/per_child/reply`);
+    assert.deepEqual(reply.body, { decision: 'once' });
+
+    service.emit(session('session.tool.success', { sessionID: CHILD, assistantMessageID: 'm_c', id: 'call_shell', content: [{ type: 'text', text: 'hi\n' }] }));
+    service.emit(session('session.tool.success', { sessionID: 'ses_new', assistantMessageID: 'm_p', id: SPAWN_CALL, content: [{ type: 'text', text: 'done' }], metadata: { sessionID: CHILD } }));
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+    assert.ok(frames.some((frame) => frame.kind === 'permission_resolved'));
+  });
+});
+
+test('a subagent\'s steps arrive as rows tied to its Agent card, and its end does not end the parent run', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer, frames } = makeWriter();
+    let finished = false;
+    const running = runtime.run('delegate', { sessionId: 'app-1', projectPath: '/tmp/p' }, writer, makeContext('ses_new'))
+      .then(() => { finished = true; });
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+
+    spawnChild(service);
+    service.emit(session('session.tool.called', { sessionID: CHILD, assistantMessageID: 'm_c', id: 'call_shell', name: 'shell', input: { command: 'ls' } }));
+    service.emit(session('session.tool.success', { sessionID: CHILD, assistantMessageID: 'm_c', id: 'call_shell', content: [{ type: 'text', text: 'a.txt' }] }));
+    service.emit(session('session.text.delta', { sessionID: CHILD, assistantMessageID: 'm_c2', ordinal: 0, delta: 'Listing' }));
+    service.emit(session('session.text.ended', { sessionID: CHILD, assistantMessageID: 'm_c2', ordinal: 0, text: 'Listing done.' }));
+    service.emit(session('session.execution.succeeded', { sessionID: CHILD }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    assert.equal(finished, false, 'the child\'s terminal event must not settle the parent run');
+    const childRows = frames.filter((frame) => frame.parentToolUseId === SPAWN_CALL);
+    assert.deepEqual(childRows.map((frame) => frame.kind), ['tool_use', 'tool_result', 'text']);
+    assert.equal(childRows[0].toolName, 'shell');
+    assert.equal(childRows[2].content, 'Listing done.');
+    assert.equal(childRows[0].sessionId, 'app-1');
+    assert.equal(frames.some((frame) => frame.kind === 'stream_delta'), false, 'a child\'s streaming deltas stay out of the main thread');
+
+    service.emit(session('session.tool.success', { sessionID: 'ses_new', assistantMessageID: 'm_p', id: SPAWN_CALL, content: [{ type: 'text', text: 'ok' }], metadata: { sessionID: CHILD } }));
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+    assert.equal(finished, true);
+  });
+});
+
+test('events that precede the spawn call\'s progress event are held and then tied to the card', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer, frames } = makeWriter();
+    const running = runtime.run('delegate', { sessionId: 'app-1', projectPath: '/tmp/p' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+
+    service.emit(session('session.created', { sessionID: CHILD, parentID: 'ses_new' }));
+    service.emit(session('session.tool.called', { sessionID: CHILD, assistantMessageID: 'm_c', id: 'call_early', name: 'read', input: { path: '/tmp/a' } }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(frames.some((frame) => frame.toolId === 'call_early'), false, 'nothing is sent without a card to attach to');
+
+    service.emit(session('session.tool.progress', { sessionID: 'ses_new', id: SPAWN_CALL, metadata: { sessionID: CHILD } }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const early = frames.find((frame) => frame.toolId === 'call_early');
+    assert.equal(early?.parentToolUseId, SPAWN_CALL);
+
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+  });
+});
+
+test('a grandchild session belongs to the same root run and its rows tie to the outer card', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer, frames } = makeWriter();
+    const running = runtime.run('delegate', { sessionId: 'app-1', projectPath: '/tmp/p' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+
+    spawnChild(service);
+    spawnChild(service, { child: GRANDCHILD, parent: CHILD, call: 'call_inner' });
+    service.emit(session('session.tool.called', { sessionID: GRANDCHILD, assistantMessageID: 'm_g', id: 'call_deep', name: 'read', input: { path: '/x' } }));
+    service.emit({ type: 'permission.asked', data: { id: 'per_deep', sessionID: GRANDCHILD, action: 'read', resources: ['/x'], source: { type: 'tool', messageID: 'm_g', id: 'call_deep' } } });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const deep = frames.find((frame) => frame.toolId === 'call_deep');
+    assert.equal(deep?.parentToolUseId, SPAWN_CALL, 'nested rows tie to the card the user sees');
+    assert.equal(frames.find((frame) => frame.kind === 'permission_request')?.sessionId, 'app-1');
+    const deepCard = frames.find((frame) => frame.kind === 'permission_request');
+    assert.equal((deepCard?.context as { subagent?: { toolUseId: string } } | undefined)?.subagent?.toolUseId, SPAWN_CALL);
+
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+  });
+});
+
+test('a session nobody here owns is still ignored', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer, frames } = makeWriter();
+    const running = runtime.run('go', { sessionId: 'app-1', projectPath: '/tmp/p' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+
+    service.emit(session('session.created', { sessionID: 'ses_other_child', parentID: 'ses_other_parent' }));
+    service.emit(session('session.tool.called', { sessionID: 'ses_other_child', id: 'call_x', name: 'shell', input: {} }));
+    service.emit({ type: 'permission.asked', data: { id: 'per_x', sessionID: 'ses_other_child', action: 'shell', resources: [], source: { id: 'call_x' } } });
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+
+    assert.equal(frames.some((frame) => frame.kind === 'permission_request' || frame.toolId === 'call_x'), false);
+  });
+});
+
+test('a grandchild adopted before its ancestor\'s card is known ties to the outer card once that is known', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer, frames } = makeWriter();
+    const running = runtime.run('delegate', { sessionId: 'app-1', projectPath: '/tmp/p' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+
+    // The child exists, but the call that spawned it has not been reported.
+    service.emit(session('session.created', { sessionID: CHILD, parentID: 'ses_new' }));
+    service.emit(session('session.created', { sessionID: GRANDCHILD, parentID: CHILD }));
+    service.emit(session('session.tool.progress', { sessionID: CHILD, id: 'call_inner', metadata: { sessionID: GRANDCHILD } }));
+    service.emit(session('session.tool.called', { sessionID: GRANDCHILD, assistantMessageID: 'm_g', id: 'call_deep', name: 'read', input: { path: '/x' } }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(frames.some((frame) => frame.toolId === 'call_deep'), false, 'held while the outer card is unknown');
+
+    service.emit(session('session.tool.progress', { sessionID: 'ses_new', id: SPAWN_CALL, metadata: { sessionID: CHILD } }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(frames.find((frame) => frame.toolId === 'call_deep')?.parentToolUseId, SPAWN_CALL, 'not the nested call');
+
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+  });
+});
+
+test('a child session spawned again by a later call follows the newest call', async () => {
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer, frames } = makeWriter();
+    const running = runtime.run('delegate', { sessionId: 'app-1', projectPath: '/tmp/p' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+
+    spawnChild(service, { call: 'call_first' });
+    service.emit(session('session.tool.called', { sessionID: CHILD, assistantMessageID: 'm_1', id: 'step_one', name: 'read', input: {} }));
+    // The agent is resumed through its session id by a second call.
+    service.emit(session('session.tool.progress', { sessionID: 'ses_new', id: 'call_second', metadata: { sessionID: CHILD } }));
+    service.emit(session('session.tool.called', { sessionID: CHILD, assistantMessageID: 'm_2', id: 'step_two', name: 'read', input: {} }));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(frames.find((frame) => frame.toolId === 'step_one')?.parentToolUseId, 'call_first');
+    assert.equal(frames.find((frame) => frame.toolId === 'step_two')?.parentToolUseId, 'call_second');
+
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+  });
+});
+
+test('steps dropped because the card never became known are logged once', async (t) => {
+  const warnings: string[] = [];
+  t.mock.method(console, 'warn', (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); });
+  await withRuntime(async ({ service, runtime }) => {
+    const { writer } = makeWriter();
+    const running = runtime.run('delegate', { sessionId: 'app-1', projectPath: '/tmp/p' }, writer, makeContext('ses_new'));
+    await service.waitForRequest((request) => request.path.endsWith('/prompt'));
+
+    service.emit(session('session.created', { sessionID: CHILD, parentID: 'ses_new' }));
+    for (let index = 0; index < 520; index += 1) {
+      service.emit(session('session.tool.called', { sessionID: CHILD, assistantMessageID: `m_${index}`, id: `step_${index}`, name: 'read', input: {} }));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(warnings.filter((line) => /dropping steps of a subagent/.test(line)).length, 1);
+
+    service.emit(session('session.execution.succeeded', {}));
+    await running;
+  });
 });

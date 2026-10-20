@@ -148,6 +148,7 @@ test('allows forceSendQueuedDraft to send message immediately with forceInterrup
 
   assert.equal(sent.length, 0);
   assert.ok(result.current.queuedDraft);
+  assert.equal(result.current.canForceSendQueuedDraft, true);
 
   // User explicitly clicks force send
   await act(async () => {
@@ -211,4 +212,79 @@ test('appends subsequent inputs into existing queued draft without overwriting',
   });
 
   assert.equal(result.current.queuedDraft?.content, 'first part\n\nsecond part');
+});
+
+test('a queued draft offers no force send while a reply is still in flight', async () => {
+  const { useChatComposerState } = await import('@/modules/chat/hooks/useChatComposerState');
+  // The server refuses a second run while one is going (RUN_IN_PROGRESS), so
+  // a force send mid-turn could only fail.
+  const responding = new Map([['session-1', { statusText: 'Thinking', canInterrupt: true, startedAt: 1 }]]);
+  const { result } = renderHook(() =>
+    useChatComposerState({
+      selectedProject,
+      selectedSession,
+      currentSessionId: 'session-1',
+      provider: 'codex',
+      permissionMode: 'bypassPermissions',
+      cyclePermissionMode: () => undefined,
+      resolvePermissionModeForProvider: () => 'bypassPermissions',
+      currentProviderModel: 'gpt-5',
+      currentProviderEffort: 'default',
+      isLoading: true,
+      hasActiveBackgroundTasks: true,
+      backgroundTasks: [{ id: 'call_agent', toolName: 'Agent', command: 'Review', startedAt: 1 }],
+      canAbortSession: true,
+      processingSessions: responding,
+      tokenBudget: null,
+      sendMessage: () => undefined,
+      stickToBottomAfterSend: () => undefined,
+      addMessage: () => undefined,
+      setPendingPermissionRequests: () => undefined,
+    }),
+  );
+
+  assert.equal(result.current.canForceSendQueuedDraft, false);
+});
+
+test('a message sent during background work that does not hold the input goes out at once', async () => {
+  // Earlier tests leave their queued draft for this session in storage.
+  localStorage.clear();
+  const { useChatComposerState } = await import('@/modules/chat/hooks/useChatComposerState');
+  const sent: Array<Record<string, unknown>> = [];
+  const { result } = renderHook(() =>
+    useChatComposerState({
+      selectedProject,
+      selectedSession,
+      currentSessionId: 'session-1',
+      provider: 'claude',
+      permissionMode: 'bypassPermissions',
+      cyclePermissionMode: () => undefined,
+      resolvePermissionModeForProvider: () => 'bypassPermissions',
+      currentProviderModel: 'claude-3-7-sonnet',
+      currentProviderEffort: 'default',
+      // The background phase counts as busy, but Claude takes the next turn
+      // on its held process, so nothing holds the input back.
+      isLoading: true,
+      isInputBlocked: false,
+      hasActiveBackgroundTasks: true,
+      backgroundTasks: [{ id: 't1', toolName: 'Bash', command: 'npm run dev', startedAt: Date.now() }],
+      canAbortSession: true,
+      tokenBudget: null,
+      sendMessage: (payload) => sent.push(payload as Record<string, unknown>),
+      stickToBottomAfterSend: () => undefined,
+      addMessage: () => undefined,
+      setPendingPermissionRequests: () => undefined,
+    }),
+  );
+
+  act(() => {
+    result.current.handleInputChange({ target: { value: 'change direction' } } as never);
+  });
+  await act(async () => {
+    await result.current.handleSubmit(submitEvent);
+  });
+
+  assert.equal(result.current.queuedDraft, null);
+  await waitFor(() => assert.equal(sent.length, 1));
+  assert.equal(sent[0]?.content, 'change direction');
 });

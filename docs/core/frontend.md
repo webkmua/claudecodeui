@@ -1,6 +1,6 @@
 # 前端架构（Frontend）
 
-> 基准：2.9.0 / 2026-10-07
+> 基准：2.10.0 / 2026-10-20
 > **核心文档**：改动 `src/shared/**` 或聊天渲染/性能相关代码时**必须同步更新本文**。
 > 普通 bug 修复不动架构的不需要更新（提交时走 `--no-verify`，见 `AGENTS.md`）。
 
@@ -28,6 +28,8 @@ React 18 + TypeScript + Vite 7（`vite.config.js`，别名 `@` → `src/`，`@sh
 
 前后端共用的 `NormalizedMessage` 是聊天时间线的 wire contract；provider 给出的跨路行身份和历史正文完整度必须由 WebSocket 与历史接口原样传入 `SessionTimelineStore`，不能在视图模型层重新生成。身份的分段与对账规则见 [chat.md](./chat.md)。本地 Markdown 图片经授权端点转换为 Blob URL 后，组件换图或卸载必须中止请求并恰好释放一次 URL。
 
+`WebSocketContext` 只分发当前 socket 的回调，已被替换连接的迟到正文、打开和错误回调不能改变新连接。连接建立后，聊天接收器主动订阅已有会话，先通过确认建立网关代次，再让带代次的事件进入时间线。`SessionTimelineStore` 的连续应用游标与确认水位分开；有界缺口缓存、逐事件状态和指令执行、历史恢复基线见 [chat.md](./chat.md)。接收器不另建去重账。历史恢复失败提示使用 `chat.replay.recoveryFailed` 文案，简体、繁体和英文登记在各语言的 `chat.json`，其他语言沿现有英文回退。提示复用错误卡，不增加持久化消息；恢复成功后移除。
+
 ## Provider 相关前端（零分支原则）
 
 - **能力/目录的唯一来源是后端**：`useProviderCapabilities`（`GET /api/providers/capabilities`）+ `useChatProviderState`（`GET /api/providers/<p>/models` 拉统一模型目录，合成 `providerModelCatalog`）。
@@ -40,6 +42,10 @@ React 18 + TypeScript + Vite 7（`vite.config.js`，别名 `@` → `src/`，`@sh
 会话的显示名一律取 `ProjectSession.summary`，`getSessionTitle()` 是唯一入口。
 类型里**没有** `name` 备选字段：曾经有过，后端从未下发，而优先读它的代码因此显示占位名。
 新增读取点不要再加 `|| session.name` 之类的兜底。
+
+同一个会话在前端有两份拷贝：侧边栏那一行（`projects[].sessions`）和当前打开的会话（`selectedSession`）。工作区头部和浏览器标题读的是后者，所以名字到达时两份都要写，只写侧边栏会让头部停在旧名。改名（用户手动改、引擎自己起名）走同一条合并路径，并沿用手动改名的做法：丢掉一次性搜索定位信息，否则新名字会把对话滚回先前搜索命中的位置。
+
+引擎自己起的名以「仅元数据」增量（`session_upserted` 带 `metadataOnly`）到达，只改名字：不重读消息、不打待看标记、不改列表排序与活跃时间。带新名字的普通增量仍然按原义处理（会话有动静），但名字照样合并。
 
 ### 消息类型的归属
 
@@ -115,7 +121,7 @@ MCP 服务器表单按 `useProviderMcpCapabilities()` 渲染。首屏与请求�
   注册一个读取器，导出控件按当前会话 id 取。
 
 隐私是格式契约：报告不得包含聊天正文、凭证、Cookie、请求头或 URL query。帧只留决定行身份的
-字段（`kind` / `id` / `toolId` / `role` / `seq` + 截断摘要）；只有构建产物的 `/assets/`
+字段（`kind` / `id` / `toolId` / `role` / `seq`、网关代次与订阅游标、确认窗口和 `stale` + 截断摘要）；只有构建产物的 `/assets/`
 路径可保留文件名，API、其他同源资源和外站资源分别归类为 `/api`、`same_origin_other`、
 `external`；服务端运行记录只有标识、计时和计数。浏览器不支持的性能条目写 `null`，不可伪造为零。
 应用可用性路径若变更，须继续用 `markStartupMilestone()` 标记入口执行、React 首次提交、
@@ -152,3 +158,9 @@ MCP 服务器表单按 `useProviderMcpCapabilities()` 渲染。首屏与请求�
 | 新增设置分区 | `src/modules/settings/`（各分区独立组件），文案走 i18n 三语言 |
 | 新增面板/标签页 | `src/modules/project-workspace/`（Shell 布局 + 标签页） |
 | 引入新依赖 | 先确认不破坏性能守则（全量 Prism、per-frame setState、CV:auto 都是禁区） |
+
+## 大结果附件
+
+`OutputAssets` 从结果里的受限资源地址提取图片和完整文本入口，重复地址只展示一次。入口默认折叠，展开前不挂载图片组件，因此浏览器不会为整段读图历史一次性拉取所有图片。图片复用 `ChatMessageImages` 和统一查看器；全文复用文件附件下载。图片引用即使落在旧的 `images.data` 字段，也走 assets API 的鉴权读取，不交给裸 `img` 请求。
+
+HTML、PDF 导出通过 assets API 顺序读取引用的资源并内嵌 data URL，附件用原生 `details` 与下载链接显示，不依赖 React 事件。JSON 导出保留消息并附资源映射。读取失败使导出明确失败，不生成缺少附件的文件。完整导出需要在浏览器汇总资源，因此不能用日常聊天读取的内存预算承诺导出峰值。

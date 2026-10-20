@@ -1,17 +1,21 @@
 import { useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
 import type { ServerEvent } from '@/shared/context/WebSocketContext';
 import { showCompletionTitleIndicator } from '@/modules/chat/utils/pageTitleNotification';
 import { playChatCompletionSound, playNotificationSound } from '@/modules/chat/utils/notificationSound';
-import type { MarkSessionIdle, MarkSessionProcessing } from '@/shared/types';
-import type { PendingPermissionRequest } from '@/shared/types';
-import type { ProjectSession, LLMProvider } from '@/shared/types';
+import type { MarkSessionIdle, MarkSessionProcessing, SessionActivityMap, PendingPermissionRequest, ProjectSession, LLMProvider } from '@/shared/types';
 import type { ServerEventDirective } from '@/modules/chat/utils/sessionTimelineStore';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
+};
+
+const hasSubagentOrigin = (request: PendingPermissionRequest): boolean => {
+  const subagent = (request.context as { subagent?: unknown } | null | undefined)?.subagent;
+  return Boolean(subagent && typeof subagent === 'object');
 };
 
 const hasActionablePermissionRequests = (requests: Array<{ toolName?: unknown }> | null | undefined): boolean => {
@@ -20,6 +24,7 @@ const hasActionablePermissionRequests = (requests: Array<{ toolName?: unknown }>
 
 type UseChatRealtimeHandlersArgs = {
   isActive: boolean;
+  sendMessage: (message: unknown) => void;
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
   provider: LLMProvider;
   selectedSession: ProjectSession | null;
@@ -31,6 +36,8 @@ type UseChatRealtimeHandlersArgs = {
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
   onSessionProcessing?: MarkSessionProcessing;
   onSessionIdle?: MarkSessionIdle;
+  /** Which sessions are busy; a `background_tasks` frame must not demote a reply in flight. */
+  processingSessions?: SessionActivityMap;
   onWebSocketReconnect?: () => void;
   requestLatestMessages: (sessionId: string, allowNetwork?: boolean) => Promise<void>;
   sessionStore: SessionStore;
@@ -51,6 +58,7 @@ type UseChatRealtimeHandlersArgs = {
  */
 export function useChatRealtimeHandlers({
   isActive,
+  sendMessage,
   subscribe,
   provider,
   selectedSession,
@@ -61,10 +69,26 @@ export function useChatRealtimeHandlers({
   statusCheckSentAtRef,
   onSessionProcessing,
   onSessionIdle,
+  processingSessions,
   onWebSocketReconnect,
   requestLatestMessages,
   sessionStore,
 }: UseChatRealtimeHandlersArgs) {
+  const { t } = useTranslation('chat');
+  // One retry chain per recovery identity; ordinary rerenders must not restart it.
+  const recoveryRetriesRef = useRef(new Map<string, { id: number; attempts: number; timer: ReturnType<typeof setTimeout> | null }>());
+  // Async failures after unmount must not schedule a new retry chain.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    const retries = recoveryRetriesRef.current;
+    return () => {
+      mountedRef.current = false;
+      for (const retry of retries.values()) if (retry.timer !== null) clearTimeout(retry.timer);
+      retries.clear();
+    };
+  }, []);
+
   // Session switches can send `chat.subscribe` before this effect has a chance
   // to rebind the websocket listener. Read the visible session id from a ref
   // so a fast `chat_subscribed` ack is matched against the current view, not
@@ -79,10 +103,15 @@ export function useChatRealtimeHandlers({
   // notification sound before React finishes a rerender.
   const pendingPermissionRequestsRef = useRef(pendingPermissionRequests);
   const sessionHadBackgroundTasksRef = useRef<Map<string, boolean>>(new Map());
+  const processingSessionsRef = useRef(processingSessions);
 
   useEffect(() => {
     pendingPermissionRequestsRef.current = pendingPermissionRequests;
   }, [pendingPermissionRequests]);
+
+  useEffect(() => {
+    processingSessionsRef.current = processingSessions;
+  }, [processingSessions]);
 
   useEffect(() => {
     const handleEvent = (msg: ServerEvent) => {
@@ -92,6 +121,10 @@ export function useChatRealtimeHandlers({
 
       // Transport-synthesized (no timeline state; the store never sees it).
       if (msg.kind === 'websocket_reconnected') {
+        sessionStore.beginConnection();
+        const sessions = new Set(sessionStore.getKnownSessionIds());
+        if (activeViewSessionIdRef.current) sessions.add(activeViewSessionIdRef.current);
+        for (const sessionId of sessions) executeDirective({ effect: 'replay_request', sessionId });
         onWebSocketReconnect?.();
         return;
       }
@@ -101,20 +134,48 @@ export function useChatRealtimeHandlers({
         return;
       }
 
-      const directive = sessionStore.applyServerEvent(msg, {
+      sessionStore.applyServerEvent(msg, {
         fallbackSessionId: activeViewSessionIdRef.current,
         provider,
+        onDirective: executeDirective,
       });
-      if (!directive) {
-        return;
-      }
-
-      executeDirective(directive);
     };
 
     /** Runs the app reactions one frame requires. No timeline state in here. */
     function executeDirective(directive: ServerEventDirective): void {
       switch (directive.effect) {
+        case 'replay_request': {
+          statusCheckSentAtRef.current.set(directive.sessionId, Date.now());
+          sendMessage({ type: 'chat.subscribe', sessions: [sessionStore.getSubscriptionCursor(directive.sessionId)] });
+          return;
+        }
+        case 'recover_stream': {
+          const { sessionId, recoveryId } = directive;
+          const previous = recoveryRetriesRef.current.get(sessionId);
+          if (previous?.id === recoveryId) return;
+          if (previous?.timer != null) clearTimeout(previous.timer);
+          const retry = { id: recoveryId, attempts: 0, timer: null as ReturnType<typeof setTimeout> | null };
+          recoveryRetriesRef.current.set(sessionId, retry);
+          const current = () => mountedRef.current && recoveryRetriesRef.current.get(sessionId) === retry
+            && sessionStore.isEventRecoveryCurrent(sessionId, recoveryId);
+          const attempt = () => {
+            retry.timer = null;
+            if (!current()) return;
+            void sessionStore.recoverEventStream(sessionId, recoveryId, {
+              provider, onDirective: executeDirective,
+            }).then(() => {
+              if (recoveryRetriesRef.current.get(sessionId) === retry) recoveryRetriesRef.current.delete(sessionId);
+            }).catch((error) => {
+              console.error('[Chat] History recovery failed:', error);
+              if (!current()) return;
+              sessionStore.setEventRecoveryError(sessionId, t('replay.recoveryFailed'), provider);
+              const delay = Math.min(1000 * 2 ** Math.min(retry.attempts++, 5), 30_000);
+              retry.timer = setTimeout(attempt, delay);
+            });
+          };
+          attempt();
+          return;
+        }
         case 'chat_subscribed': {
           // The ack's `lastSeq` is already merged into the store. `stale`
           // means the replay cursor predates the server's replay buffer, so
@@ -162,12 +223,14 @@ export function useChatRealtimeHandlers({
         }
 
         case 'protocol_error': {
-          // A rejected stop is not a terminal event. The store has shown the
-          // error, but only the runtime can settle the foreground/background
+          // A rejected stop is not a terminal event, and neither is a send the
+          // server refused because a run is still going. The store has shown
+          // the error, but only the runtime can settle the foreground/background
           // state and release queued input.
           console.error('[Chat] Protocol error:', directive.code, directive.error);
           if (directive.code === 'NO_SUCH_TASK' || directive.code === 'TASK_ID_REQUIRED'
-            || directive.code === 'TASK_STOP_FAILED' || directive.code === 'ABORT_FAILED') {
+            || directive.code === 'TASK_STOP_FAILED' || directive.code === 'ABORT_FAILED'
+            || directive.code === 'RUN_IN_PROGRESS') {
             return;
           }
           onSessionIdle?.(directive.sessionId);
@@ -182,6 +245,16 @@ export function useChatRealtimeHandlers({
           // derives from the processing map, so deleting the entry hides it
           // immediately and atomically.
           const backgroundPending = Boolean(sessionId && sessionStore.hasPendingBackgroundWork(sessionId));
+          if (sessionId) {
+            // The reply is over now, not at the next render: a task frame
+            // landing before React re-renders must see it as over.
+            const turnActivity = processingSessionsRef.current?.get(sessionId);
+            if (turnActivity && !turnActivity.background) {
+              const settled = new Map(processingSessionsRef.current);
+              settled.delete(sessionId);
+              processingSessionsRef.current = settled;
+            }
+          }
           if (sessionId && backgroundPending && success && !aborted) {
             onSessionProcessing?.(sessionId, { background: true });
           } else {
@@ -191,8 +264,15 @@ export function useChatRealtimeHandlers({
             }
           }
           if (sessionId === activeViewSessionIdRef.current) {
-            pendingPermissionRequestsRef.current = [];
-            setPendingPermissionRequests([]);
+            // The turn's own cards end with it. A card from a subagent that
+            // is still running is the server's to retract (`permission_cancelled`
+            // when the agent stops), so a clean finish keeps it; a failed or
+            // aborted run takes every card with it.
+            const surviving = success && !aborted
+              ? pendingPermissionRequestsRef.current.filter((request) => hasSubagentOrigin(request))
+              : [];
+            pendingPermissionRequestsRef.current = surviving;
+            setPendingPermissionRequests(surviving);
           }
 
           if (aborted || !success) {
@@ -235,6 +315,13 @@ export function useChatRealtimeHandlers({
           if (directive.text === 'token_budget' && directive.tokenBudget) {
             setTokenBudget(directive.tokenBudget as Record<string, unknown>);
           } else if (directive.text === 'background_tasks' && directive.sessionId) {
+            // Agents launched and settled mid-turn (Codex, ZCode) are the
+            // turn's business: the reply stays the thing in flight, and the
+            // turn's own `complete` decides whether a background phase follows.
+            const activity = processingSessionsRef.current?.get(directive.sessionId);
+            if (activity && !activity.background) {
+              return;
+            }
             if (sessionStore.hasPendingBackgroundWork(directive.sessionId)) {
               sessionHadBackgroundTasksRef.current.set(directive.sessionId, true);
               onSessionProcessing?.(directive.sessionId, { background: true });
@@ -281,7 +368,10 @@ export function useChatRealtimeHandlers({
             }
           }
           if (directive.sessionId) {
-            onSessionProcessing?.(directive.sessionId);
+            // A card can arrive with no reply in flight (a background agent
+            // asking after the turn ended); it must not turn the session
+            // into a foreground reply.
+            onSessionProcessing?.(directive.sessionId, { awaitingApproval: true });
           }
           return;
         }
@@ -306,6 +396,8 @@ export function useChatRealtimeHandlers({
 
     return subscribe(handleEvent);
   }, [
+    t,
+    sendMessage,
     subscribe,
     provider,
     selectedSession,

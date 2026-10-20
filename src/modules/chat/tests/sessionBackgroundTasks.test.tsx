@@ -24,12 +24,12 @@ beforeEach(() => {
 
 afterEach(() => vi.unstubAllGlobals());
 
-function taskStatus(tasks: ActiveBackgroundTask[], backgroundWorkPending?: boolean): ServerEvent {
+function taskStatus(tasks: ActiveBackgroundTask[], backgroundWorkPending?: boolean, canInterrupt?: boolean): ServerEvent {
   return {
     id: 'background-status', kind: 'status', sessionId: session.id,
     timestamp: '2026-10-05T00:00:00.000Z', provider: 'claude',
     text: 'background_tasks', backgroundTasks: tasks,
-    backgroundWorkPending,
+    backgroundWorkPending, canInterrupt,
   };
 }
 
@@ -152,4 +152,75 @@ test('reconciles task state from a reconnect acknowledgement without changing se
     expect(result.current.backgroundTasks).toEqual(tasks);
     expect(result.current.hasActiveBackgroundTasks).toBe(tasks.length > 0);
   }
+});
+
+test('background work the server says cannot be stopped offers no Stop, but still holds the queue', async () => {
+  const { result } = mountSession([]);
+  await waitFor(() => expect(result.current.isLoadingSessionMessages).toBe(false));
+
+  act(() => {
+    result.current.sessionStore.applyServerEvent(taskStatus([agent], undefined, false));
+  });
+  expect(result.current.hasActiveBackgroundTasks).toBe(true);
+  expect(result.current.isProcessing).toBe(true);
+  expect(result.current.canAbortSession).toBe(false);
+
+  // A frame that says nothing about it (Claude's) counts as stoppable again.
+  act(() => {
+    result.current.sessionStore.applyServerEvent(taskStatus([agent]));
+  });
+  expect(result.current.canAbortSession).toBe(true);
+});
+
+test('a reconnect acknowledgement carries whether the background work can be stopped', async () => {
+  const { result } = mountSession([]);
+  await waitFor(() => expect(result.current.isLoadingSessionMessages).toBe(false));
+  act(() => {
+    result.current.sessionStore.applyServerEvent({
+      kind: 'chat_subscribed', sessionId: session.id, isProcessing: false,
+      timestamp: '2026-10-19T00:00:00.000Z', lastSeq: 0, stale: false,
+      pendingPermissions: [], backgroundTasks: [agent], backgroundCanInterrupt: false,
+    });
+  });
+  expect(result.current.hasActiveBackgroundTasks).toBe(true);
+  expect(result.current.canAbortSession).toBe(false);
+});
+
+test('Claude background work leaves the input open; other engines\' work holds it back', async () => {
+  const { result } = mountSession([]);
+  await waitFor(() => expect(result.current.isLoadingSessionMessages).toBe(false));
+
+  act(() => {
+    result.current.sessionStore.applyServerEvent({ ...taskStatus([agent]), backgroundWorkQueuesInput: false } as ServerEvent);
+  });
+  expect(result.current.hasActiveBackgroundTasks).toBe(true);
+  expect(result.current.isInputBlocked).toBe(false);
+
+  act(() => {
+    result.current.sessionStore.applyServerEvent(taskStatus([agent]));
+  });
+  expect(result.current.isInputBlocked).toBe(true);
+});
+
+test('a reply in flight holds the input back even when the background work would not', async () => {
+  const responding = new Map([[session.id, { statusText: 'Thinking', canInterrupt: true, startedAt: 7 }]]);
+  const { result } = mountSession([], responding);
+  await waitFor(() => expect(result.current.isLoadingSessionMessages).toBe(false));
+  act(() => {
+    result.current.sessionStore.applyServerEvent({ ...taskStatus([agent]), backgroundWorkQueuesInput: false } as ServerEvent);
+  });
+  expect(result.current.isInputBlocked).toBe(true);
+});
+
+test('a reconnect acknowledgement carries whether the background work holds the input back', async () => {
+  const { result } = mountSession([]);
+  await waitFor(() => expect(result.current.isLoadingSessionMessages).toBe(false));
+  act(() => {
+    result.current.sessionStore.applyServerEvent({
+      kind: 'chat_subscribed', sessionId: session.id, isProcessing: false,
+      timestamp: '2026-10-19T00:00:00.000Z', lastSeq: 0, stale: false,
+      pendingPermissions: [], backgroundTasks: [agent], backgroundWorkQueuesInput: false,
+    });
+  });
+  expect(result.current.isInputBlocked).toBe(false);
 });

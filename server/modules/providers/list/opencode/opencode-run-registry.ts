@@ -11,12 +11,12 @@
  * @module opencode-run-registry
  */
 
-import type { ProviderRuntimeWriter } from '@/shared/types.js';
+import type { NormalizedMessage, ProviderRuntimeWriter } from '@/shared/types.js';
 import { readObjectRecord, readOptionalString } from '@/shared/utils.js';
 
 import { OpenCodeApiError, type OpenCodeApiClient, type OpenCodeSessionSnapshot } from './opencode-api.client.js';
 import type { OpenCodeEventEnvelope } from './opencode-event-stream.js';
-import { OpenCodeSessionEventTranslator, type OpenCodeRunOutcome } from './opencode-event-translator.js';
+import { OpenCodeSessionEventTranslator, type OpenCodeRunOutcome, type OpenCodeToolCall } from './opencode-event-translator.js';
 
 /** How a run ended: an engine outcome, or `lost` when the service/session vanished under it. */
 export type OpenCodeRunSettlement =
@@ -61,6 +61,40 @@ export function toOpenCodeTokenBudget(
 }
 
 /**
+ * A session the engine created for a subagent, owned by the run that spawned
+ * it. Requests and events of such a session carry its own id, so without this
+ * record they match no run and are dropped: an approval card never appears and
+ * the subagent's steps never show.
+ */
+type OpenCodeChildSession = {
+  run: OpenCodeActiveRun;
+  /** The session that spawned this one (the root session, or another child). */
+  parentSessionId: string;
+  /**
+   * The call in the parent session that spawned this one, as the latest
+   * `session.tool.progress` named it (a resumed child is spawned again by a
+   * later call, and the newest call owns the card). The card the user sees is
+   * the one of the topmost child of the root run, so a grandchild finds its
+   * card by walking up (`cardCallIdOf`). Unknown until the call reports it.
+   */
+  spawnCallId?: string;
+  translator: OpenCodeSessionEventTranslator;
+  /** Frames translated before the card was known, flushed once it is. */
+  held: NormalizedMessage[];
+  /** Set once the held-frame cap was hit, so the loss is logged once per child. */
+  heldOverflowLogged?: boolean;
+};
+
+/** Most frames held for a child whose card is not known yet. */
+const MAX_HELD_CHILD_FRAMES = 500;
+
+/** Longest ancestor chain followed; a real tree is a few levels deep, a cycle is a bug. */
+const MAX_CHILD_DEPTH = 16;
+
+/** Frame kinds a child's stream never contributes: its finished rows carry the content. */
+const CHILD_STREAMING_KINDS = new Set(['stream_delta', 'stream_end']);
+
+/**
  * Tracks the runs of one runtime instance.
  *
  * Consumer: opencode runtime.
@@ -68,6 +102,7 @@ export function toOpenCodeTokenBudget(
 export class OpenCodeRunRegistry {
   private readonly byApp = new Map<string, OpenCodeActiveRun>();
   private readonly byProvider = new Map<string, OpenCodeActiveRun>();
+  private readonly children = new Map<string, OpenCodeChildSession>();
 
   create(appSessionId: string, providerSessionId: string, writer: ProviderRuntimeWriter): OpenCodeActiveRun {
     let settle!: (settlement: OpenCodeRunSettlement) => void;
@@ -99,7 +134,55 @@ export class OpenCodeRunRegistry {
     return [...this.byApp.values()];
   }
 
+  /**
+   * The root run's provider session and the child's tool-call lookup, for a
+   * session the engine created for a subagent. Used by the interaction bridge
+   * to show a child's approval and question cards under the root session.
+   */
+  childOwner(sessionId: string): {
+    rootProviderSessionId: string;
+    resolveToolCall: (callId: string) => OpenCodeToolCall | null;
+    /** The `Agent` card the child's requests belong to, when its spawn call is known. */
+    resolveOrigin: () => { toolUseId: string; description?: string } | null;
+  } | null {
+    const child = this.children.get(sessionId);
+    if (!child) {
+      return null;
+    }
+    return {
+      rootProviderSessionId: child.run.providerSessionId,
+      resolveToolCall: (callId) => child.translator.getToolCall(callId),
+      resolveOrigin: () => {
+        const toolUseId = this.cardCallIdOf(child);
+        if (!toolUseId) {
+          return null;
+        }
+        const description = readOptionalString(readObjectRecord(child.run.translator.getToolCall(toolUseId)?.input)?.description);
+        return { toolUseId, ...(description ? { description } : {}) };
+      },
+    };
+  }
+
+  /**
+   * Settles the cards of calls a run's children never resolved. Called when
+   * the run ends, alongside the root translator's own settle.
+   */
+  settleChildren(run: OpenCodeActiveRun): NormalizedMessage[] {
+    const frames: NormalizedMessage[] = [];
+    for (const child of this.children.values()) {
+      if (child.run === run) {
+        frames.push(...child.translator.settleOpenSubagents());
+      }
+    }
+    return frames;
+  }
+
   release(run: OpenCodeActiveRun): void {
+    for (const [sessionId, child] of this.children) {
+      if (child.run === run) {
+        this.children.delete(sessionId);
+      }
+    }
     if (this.byApp.get(run.appSessionId) === run) {
       this.byApp.delete(run.appSessionId);
     }
@@ -116,9 +199,15 @@ export class OpenCodeRunRegistry {
 
   /** Routes one service event to the run that owns its session: frames to the writer, terminals to settle. */
   dispatch(event: OpenCodeEventEnvelope): void {
-    const providerSessionId = readOptionalString(readObjectRecord(event.data)?.sessionID);
+    const data = readObjectRecord(event.data);
+    const providerSessionId = readOptionalString(data?.sessionID);
+    this.learnOwnership(event, providerSessionId, data);
     const run = providerSessionId ? this.byProvider.get(providerSessionId) : null;
     if (!run) {
+      const child = providerSessionId ? this.children.get(providerSessionId) : undefined;
+      if (child) {
+        this.dispatchChild(child, event);
+      }
       return;
     }
     const { frames, terminal } = run.translator.translate(event);
@@ -128,6 +217,130 @@ export class OpenCodeRunRegistry {
     if (terminal) {
       run.settle(terminal);
     }
+  }
+
+  /**
+   * Learns which sessions belong to a run: `session.created` names a child's
+   * parent, and a spawn call's `session.tool.progress` names the child it
+   * started (`metadata.sessionID`) and the call that owns its card.
+   */
+  private learnOwnership(event: OpenCodeEventEnvelope, sessionId: string | undefined, data: Record<string, unknown> | null): void {
+    if (!sessionId || !data) {
+      return;
+    }
+    if (event.type === 'session.created') {
+      const parentId = readOptionalString(data.parentID);
+      if (parentId && !this.children.has(sessionId)) {
+        this.adoptChild(sessionId, parentId);
+      }
+      return;
+    }
+    if (event.type === 'session.tool.progress') {
+      const childId = readOptionalString(readObjectRecord(data.metadata)?.sessionID);
+      const callId = readOptionalString(data.id);
+      if (!childId || !callId) {
+        return;
+      }
+      const child = this.children.get(childId) ?? this.adoptChild(childId, sessionId);
+      if (child && child.spawnCallId !== callId) {
+        child.spawnCallId = callId;
+        this.flushHeldBelow(childId);
+      }
+    }
+  }
+
+  /**
+   * The root-level `Agent` call whose card shows a child's steps: the spawn
+   * call of the topmost child on its ancestor chain. Resolved at dispatch time
+   * rather than copied at adoption, because a grandchild can be adopted before
+   * the call that spawned its ancestor has been reported.
+   */
+  private cardCallIdOf(child: OpenCodeChildSession): string | undefined {
+    let current = child;
+    for (let depth = 0; depth < MAX_CHILD_DEPTH; depth += 1) {
+      const parent = this.children.get(current.parentSessionId);
+      if (!parent) {
+        return current.spawnCallId;
+      }
+      current = parent;
+    }
+    return undefined;
+  }
+
+  private adoptChild(childId: string, parentId: string): OpenCodeChildSession | null {
+    const rootRun = this.byProvider.get(parentId);
+    const parentChild = rootRun ? undefined : this.children.get(parentId);
+    const run = rootRun ?? parentChild?.run;
+    if (!run) {
+      return null;
+    }
+    const child: OpenCodeChildSession = {
+      run,
+      parentSessionId: parentId,
+      translator: new OpenCodeSessionEventTranslator(run.appSessionId),
+      held: [],
+    };
+    this.children.set(childId, child);
+    return child;
+  }
+
+  private dispatchChild(child: OpenCodeChildSession, event: OpenCodeEventEnvelope): void {
+    // A child's own end is not the run's end: only the root session settles it.
+    const { frames } = child.translator.translate(event);
+    const cardCallId = this.cardCallIdOf(child);
+    for (const frame of frames) {
+      if (CHILD_STREAMING_KINDS.has(frame.kind)) {
+        continue;
+      }
+      if (cardCallId === undefined) {
+        if (child.held.length < MAX_HELD_CHILD_FRAMES) {
+          child.held.push(frame);
+        } else if (!child.heldOverflowLogged) {
+          child.heldOverflowLogged = true;
+          console.warn(
+            `[OpenCode] dropping steps of a subagent session whose card is still unknown (more than ${MAX_HELD_CHILD_FRAMES} held)`,
+          );
+        }
+        continue;
+      }
+      child.run.writer.send(this.tieToCard(frame, cardCallId));
+    }
+  }
+
+  /** Sends what a child (and every session below it) held while its card was unknown. */
+  private flushHeldBelow(rootChildId: string): void {
+    for (const [childId, child] of this.children) {
+      if (child.held.length === 0) {
+        continue;
+      }
+      if (childId !== rootChildId && !this.isBelow(childId, rootChildId)) {
+        continue;
+      }
+      const cardCallId = this.cardCallIdOf(child);
+      if (cardCallId === undefined) {
+        continue;
+      }
+      for (const frame of child.held) {
+        child.run.writer.send(this.tieToCard(frame, cardCallId));
+      }
+      child.held = [];
+    }
+  }
+
+  private isBelow(childId: string, ancestorId: string): boolean {
+    let current = this.children.get(childId);
+    for (let depth = 0; current && depth < MAX_CHILD_DEPTH; depth += 1) {
+      if (current.parentSessionId === ancestorId) {
+        return true;
+      }
+      current = this.children.get(current.parentSessionId);
+    }
+    return false;
+  }
+
+  /** Marks a child's row as belonging to the card of `callId`. */
+  private tieToCard(frame: NormalizedMessage, callId: string): NormalizedMessage {
+    return { ...frame, parentToolUseId: callId };
   }
 
   /**

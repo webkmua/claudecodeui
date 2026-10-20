@@ -4,6 +4,7 @@ import path from 'node:path';
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcastSessionRemoved, broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
+import { providerRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
 import { listBusyClaudeCliSessions } from '@/modules/providers/services/claude-cli-liveness.service.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
 import type {
@@ -97,7 +98,7 @@ type SessionDetails = {
   } | null;
 };
 
-const MAX_CLOUDCLI_SESSION_NAME_WORDS = 4;
+const MAX_CLOUDCLI_SESSION_NAME_CHARS = 40;
 
 /**
  * How long a `clientRequestId` keeps pointing at the session it allocated.
@@ -152,9 +153,24 @@ function rememberIdempotentSession(clientRequestId: string, result: CreateAppSes
   });
 }
 
+/**
+ * Derives the initial session name from the first message: the first sentence
+ * (first line when it has no terminator), capped in length. Word-splitting is
+ * not usable here — Chinese text has no spaces, so the old word-based rule
+ * turned a whole message into the title.
+ */
 function buildCloudCliSessionName(initialMessage: string): string {
-  const words = initialMessage.trim().split(/\s+/).filter(Boolean);
-  return words.slice(0, MAX_CLOUDCLI_SESSION_NAME_WORDS).join(' ') || 'Untitled Session';
+  const firstLine = initialMessage
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? '';
+  // Leading terminators describe nothing ("？？？为什么崩" is about the crash),
+  // and would otherwise cut the first sentence to nothing. The Latin period is
+  // left out on purpose: "1." and "e.g." would otherwise gut the name.
+  const stripped = firstLine.replace(/^[。？！；?!;\s]+/, '');
+  const [firstSentence] = (stripped || firstLine).split(/[。？！；?!;]/);
+  return (firstSentence ?? '').trim().slice(0, MAX_CLOUDCLI_SESSION_NAME_CHARS)
+    || 'Untitled Session';
 }
 
 /**
@@ -228,6 +244,69 @@ function resolveProjectDisplayName(
   }
 
   return path.basename(projectPath) || projectPath;
+}
+
+/**
+ * Archives or permanently deletes a session whose work is over.
+ *
+ * The caller has already closed the admission and checked that nothing is
+ * running, so this only performs the action and reports it.
+ */
+async function archiveOrDeleteResolvedSession(
+  session: {
+    session_id: string;
+    provider: string;
+    provider_session_id: string | null;
+    jsonl_path: string | null;
+    project_path: string | null;
+  },
+  resolvedSessionId: string,
+  options: { force?: boolean; deletedFromDisk?: boolean },
+): Promise<{ sessionId: string; action: 'archived' | 'deleted'; deletedFromDisk: boolean }> {
+  if (!options.force) {
+    sessionsDb.updateSessionIsArchived(resolvedSessionId, true);
+    // The initiating client cleans up its own list; the broadcast is for the
+    // other connected clients (idempotent for the initiator).
+    broadcastSessionRemoved([resolvedSessionId]);
+    return {
+      sessionId: resolvedSessionId,
+      action: 'archived',
+      deletedFromDisk: false,
+    };
+  }
+
+  let removedFromDisk = false;
+  if (options.deletedFromDisk) {
+    removedFromDisk = await cleanupProviderNativeSession(session);
+    // Every file the conversation has lived in, not just the one the row
+    // points at now: editing a message on a provider that rewinds by
+    // branching moves the session onto a copy and leaves the earlier
+    // transcript behind. Deleting only the current one would leave the
+    // replaced turns on disk, and unreachable through the app.
+    const transcripts = [
+      ...(session.jsonl_path ? [session.jsonl_path] : []),
+      ...sessionsDb.getSupersededTranscriptPaths(resolvedSessionId),
+    ];
+    for (const transcript of transcripts) {
+      removedFromDisk = (await removePathIfExists(transcript)) || removedFromDisk;
+    }
+  }
+
+  sessionsDb.clearSupersededProviderSessions(resolvedSessionId);
+  const deleted = sessionsDb.deleteSessionById(resolvedSessionId);
+  if (!deleted) {
+    throw new AppError(`Session "${resolvedSessionId}" was not found.`, {
+      code: 'SESSION_NOT_FOUND',
+      statusCode: 404,
+    });
+  }
+
+  broadcastSessionRemoved([resolvedSessionId]);
+  return {
+    sessionId: resolvedSessionId,
+    action: 'deleted',
+    deletedFromDisk: removedFromDisk,
+  };
 }
 
 /**
@@ -374,8 +453,10 @@ export const sessionsService = {
    * chat, navigates to the returned id immediately, and the id never changes
    * for the lifetime of the conversation. The provider-native id is mapped to
    * this row later, when the provider runtime announces it mid-run. Its title
-   * comes directly from the first visible CloudCLI message and is limited to
-   * four whole words before any provider-owned storage exists.
+   * comes directly from the first visible CloudCLI message — its first
+   * sentence, capped — and stays followable: once the engine generates its own
+   * title, a later synchronizer pass replaces this one (unless the user
+   * renames the session).
    */
   createAppSession(
     provider: LLMProvider,
@@ -475,6 +556,9 @@ export const sessionsService = {
       provider,
       projectPath: source.project_path ?? '',
       customName: sessionName,
+      // A typed fork title is user intent; the auto-derived "(fork)" name
+      // stays followable so the engine can replace it with its own.
+      nameLocked: Boolean(options.title?.trim()),
       providerSessionId: forked.providerSessionId,
       jsonlPath: forked.jsonlPath,
       forkedFromSessionId: sessionId,
@@ -803,50 +887,34 @@ export const sessionsService = {
 
     const resolvedSessionId = session.session_id;
 
-    if (!options.force) {
-      sessionsDb.updateSessionIsArchived(resolvedSessionId, true);
-      // The initiating client cleans up its own list; the broadcast is for the
-      // other connected clients (idempotent for the initiator).
-      broadcastSessionRemoved([resolvedSessionId]);
-      return {
-        sessionId: resolvedSessionId,
-        action: 'archived',
-        deletedFromDisk: false,
-      };
-    }
+    // A conversation with work in flight cannot be archived away: the work
+    // would keep running against a session the user can no longer see. The
+    // admission closes first, so no run starts between the check and the
+    // action.
+    providerRuntimeService.closeSessionAdmission(resolvedSessionId);
+    let keepAdmissionClosed = false;
+    try {
+      if (providerRuntimeService.hasSessionWork(resolvedSessionId)) {
+        throw new AppError('This conversation is still working. Stop it before archiving it.', {
+          code: 'SESSION_HAS_ACTIVE_WORK',
+          statusCode: 409,
+        });
+      }
+      // An idle resident process is closed with the conversation, so the
+      // engine does not keep working for a session that is gone. The
+      // admission stays closed until the action is done.
+      providerRuntimeService.releaseSession(resolvedSessionId);
 
-    let removedFromDisk = false;
-    if (options.deletedFromDisk) {
-      removedFromDisk = await cleanupProviderNativeSession(session);
-      // Every file the conversation has lived in, not just the one the row
-      // points at now: editing a message on a provider that rewinds by
-      // branching moves the session onto a copy and leaves the earlier
-      // transcript behind. Deleting only the current one would leave the
-      // replaced turns on disk, and unreachable through the app.
-      const transcripts = [
-        ...(session.jsonl_path ? [session.jsonl_path] : []),
-        ...sessionsDb.getSupersededTranscriptPaths(resolvedSessionId),
-      ];
-      for (const transcript of transcripts) {
-        removedFromDisk = (await removePathIfExists(transcript)) || removedFromDisk;
+      const result = await archiveOrDeleteResolvedSession(session, resolvedSessionId, options);
+      // A deleted conversation is gone for good; an archived one opens again
+      // when it is restored.
+      keepAdmissionClosed = result.action === 'deleted';
+      return result;
+    } finally {
+      if (!keepAdmissionClosed) {
+        providerRuntimeService.openSessionAdmission(resolvedSessionId);
       }
     }
-
-    sessionsDb.clearSupersededProviderSessions(resolvedSessionId);
-    const deleted = sessionsDb.deleteSessionById(resolvedSessionId);
-    if (!deleted) {
-      throw new AppError(`Session "${resolvedSessionId}" was not found.`, {
-        code: 'SESSION_NOT_FOUND',
-        statusCode: 404,
-      });
-    }
-
-    broadcastSessionRemoved([resolvedSessionId]);
-    return {
-      sessionId: resolvedSessionId,
-      action: 'deleted',
-      deletedFromDisk: removedFromDisk,
-    };
   },
 
   /**
@@ -868,6 +936,8 @@ export const sessionsService = {
 
   /**
    * Renames one session by id without requiring the caller to pass provider.
+   *
+   * A user rename locks the name: engine-generated titles never overwrite it.
    */
   renameSessionById(sessionId: string, summary: string): { sessionId: string; summary: string } {
     const session =
@@ -879,7 +949,7 @@ export const sessionsService = {
       });
     }
 
-    sessionsDb.updateSessionCustomName(session.session_id, summary);
+    sessionsDb.updateSessionCustomName(session.session_id, summary, { lockName: true });
     return { sessionId: session.session_id, summary };
   },
 

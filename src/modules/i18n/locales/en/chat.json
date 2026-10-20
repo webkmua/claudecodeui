@@ -1,4 +1,7 @@
 {
+  "replay": {
+    "recoveryFailed": "Chat sync failed. Retrying automatically; your existing messages are kept. You can also reload this page to retry."
+  },
   "codeBlock": {
     "copy": "Copy",
     "copied": "Copied",
@@ -143,7 +146,10 @@
       "label": "Queued",
       "willSend": "Will send when this finishes",
       "edit": "Edit queued message",
-      "delete": "Delete queued message"
+      "delete": "Delete queued message",
+      "willSendAfterBackground": "Will send when the background tasks finish",
+      "forceSend": "Send now; background tasks keep running",
+      "forceSendButton": "Send now"
     }
   },
   "composer": {
@@ -157,6 +163,18 @@
       "title": "Replacing an earlier message",
       "filesNotReverted": "files the agent already changed are not reverted",
       "cancel": "Cancel"
+    },
+    "backgroundTasks": {
+      "title_one": "Background task running ({{count}})",
+      "title_other": "Background tasks running ({{count}})",
+      "hint": "Messages are queued and sent when the tasks finish",
+      "hintShort": "Sending queues",
+      "hintTurn": "Messages are queued and sent when this turn ends",
+      "hintTurnShort": "Sent after this turn",
+      "abort": "Stop background tasks",
+      "abortButton": "Stop",
+      "hintContinue": "Send anytime; background tasks keep running",
+      "hintContinueShort": "Send anytime"
     }
   },
   "providerSelection": {
@@ -367,6 +385,8 @@
     "resetCardWeeklyAlso5h": "Resetting the weekly allowance also refills the 5-hour pool, without spending a 5-hour card."
   },
   "misc": {
+    "outputAssets": "Output attachments ({{count}})",
+    "fullOutput": "Full output.txt",
     "copyToClipboard": "Copy to clipboard",
     "copyCommand": "Copy command",
     "runningTask": "Running task",
@@ -431,5 +451,27 @@
   "memory": {
     "used_one": "Used {{count}} memory",
     "used_other": "Used {{count}} memories"
+  },
+  "subagent": {
+    "status": {
+      "running": "running",
+      "done": "done",
+      "failed": "failed",
+      "noResult": "no result"
+    },
+    "noResultHint": "The agent ended without handing back a result. It may have made partial changes before it stopped.",
+    "tools_one": "{{count}} tool",
+    "tools_other": "{{count}} tools",
+    "task": "Task",
+    "result": "Result",
+    "steps_one": "{{count}} step",
+    "steps_other": "{{count}} steps",
+    "showMore_one": "Show {{count}} more step",
+    "showMore_other": "Show {{count}} more steps",
+    "showEarlier_one": "Show {{count}} earlier step",
+    "showEarlier_other": "Show {{count}} earlier steps",
+    "notIncluded_one": "{{count}} earlier step is not included",
+    "notIncluded_other": "{{count}} earlier steps are not included",
+    "askedBy": "From subagent: {{description}}"
   }
 }

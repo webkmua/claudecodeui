@@ -1,4 +1,5 @@
-import type { ActiveBackgroundTask, BackgroundTaskSummary } from '@/shared/types.js';
+import type { ActiveBackgroundTask, BackgroundTaskSummary, SessionBackgroundWork } from '@/shared/types.js';
+import { SUBAGENT_TOOL_NAME, canonicalClaudeSubagentToolName } from '@/shared/utils.js';
 
 // TaskCreate writes a to-do item; it does not launch an execution task.
 const DEFERRED_WORK_TOOLS = new Set(['Monitor', 'ScheduleWakeup', 'CronCreate', 'Workflow']);
@@ -64,7 +65,7 @@ export function extractBackgroundTasks(raw: unknown): ActiveBackgroundTask[] {
     if (block.type !== 'tool_use' || typeof name !== 'string'
       || (name === 'ScheduleWakeup' && input?.stop === true)
       || !(DEFERRED_WORK_TOOLS.has(name)
-        || (name === 'Agent' && input?.run_in_background !== false)
+        || (canonicalClaudeSubagentToolName(name) === SUBAGENT_TOOL_NAME && input?.run_in_background !== false)
         || (name === 'Bash' && input?.run_in_background === true))) {
       return [];
     }
@@ -72,7 +73,7 @@ export function extractBackgroundTasks(raw: unknown): ActiveBackgroundTask[] {
       : input?.description ?? input?.prompt ?? input?.command;
     return [{
       id: typeof block.id === 'string' ? block.id : '',
-      toolName: name,
+      toolName: canonicalClaudeSubagentToolName(name),
       command: typeof command === 'string' ? command : undefined,
       startedAt: Date.now(),
     }];
@@ -269,7 +270,7 @@ export function createBackgroundWorkTracker() {
       sessions.delete(sessionKey);
     },
 
-    list(): Array<{ sessionId: string; tasks: BackgroundTaskSummary[] }> {
+    list(): SessionBackgroundWork[] {
       return Array.from(sessions).flatMap(([sessionId, state]) => {
         const tasks = Array.from(state.records.values()).flatMap((record) => record.summary ? [record.summary] : []);
         return tasks.length ? [{ sessionId, tasks }] : [];

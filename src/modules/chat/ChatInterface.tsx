@@ -119,6 +119,8 @@ function ChatInterface({
     requestLatestMessages,
     backgroundTasks,
     hasActiveBackgroundTasks,
+    isReplyInFlight,
+    isInputBlocked,
   } = useChatSessionState({
     isActive,
     selectedProject,
@@ -204,6 +206,7 @@ function ChatInterface({
     closeCommandModal,
     showCostModal,
     forceSendQueuedDraft,
+    canForceSendQueuedDraft,
   } = useChatComposerState({
     selectedProject,
     selectedSession,
@@ -229,6 +232,7 @@ function ChatInterface({
     addMessage,
     setPendingPermissionRequests,
     resolvePermissionModeForProvider,
+    isInputBlocked,
     backgroundTasks,
     hasActiveBackgroundTasks,
   });
@@ -258,6 +262,7 @@ function ChatInterface({
 
   useChatRealtimeHandlers({
     isActive,
+    sendMessage,
     subscribe,
     provider,
     selectedSession,
@@ -268,6 +273,7 @@ function ChatInterface({
     statusCheckSentAtRef,
     onSessionProcessing,
     onSessionIdle,
+    processingSessions,
     onWebSocketReconnect: handleWebSocketReconnect,
     requestLatestMessages,
     sessionStore,
@@ -461,6 +467,7 @@ function ChatInterface({
           handleGrantToolPermission={handleGrantToolPermission}
           activity={sessionActivity}
           isLoading={isProcessing}
+          canAbortSession={canAbortSession}
           onAbortSession={handleAbortSession}
           onAbortBackgroundTasks={handleAbortBackgroundTasks}
           permissionMode={permissionMode}
@@ -533,7 +540,9 @@ function ChatInterface({
           sendByCtrlEnter={sendByCtrlEnter}
           backgroundTasks={backgroundTasks}
           hasActiveBackgroundTasks={hasActiveBackgroundTasks}
-          onForceSendQueuedDraft={forceSendQueuedDraft}
+          isInputBlocked={isInputBlocked}
+          isReplyInFlight={isReplyInFlight}
+          onForceSendQueuedDraft={canForceSendQueuedDraft ? forceSendQueuedDraft : undefined}
         />
         </div>
       </div>

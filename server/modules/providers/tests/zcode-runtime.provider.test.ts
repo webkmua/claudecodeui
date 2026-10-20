@@ -150,6 +150,10 @@ rl.on('line', (line) => {
         send({ method: 'session/event', params: { sessionId, type: 'turn_complete', payload: { usage: { inputTokens: 3, outputTokens: 4 } } } });
       }
     }
+    if (msg.id === 'server-perm-bg') {
+      log('perm_answer', msg);
+      send({ method: 'session/event', params: { sessionId, type: 'subagent_stopped', payload: { agentId: 'agent_bg_1', agentType: 'general-purpose', background: true, childSessionId: 'sess_subagent_agent_bg_1', parentToolCallId: 'call_agent_bg', status: 'completed', totalDurationMs: 10, totalToolUseCount: 1, totalTokens: 5 } } });
+    }
     if (msg.id === 'server-perm-e2e') {
       log('perm_answer', msg);
       // Late re-announcement of the SAME business requestId under a fresh
@@ -174,6 +178,20 @@ rl.on('line', (line) => {
     if (msg.id === 'server-perm-conflict-b') {
       log('perm_answer', msg);
     }
+    return;
+  }
+
+  // mode "handover-window": answers session/subscribe only after emitting a
+  // text delta and the stop of the background agent an earlier turn left
+  // running, so both land while the runtime is still setting a new run up —
+  // between its start and the moment it sends the prompt.
+  if (msg.method === 'session/subscribe' && readMode() === 'handover-window') {
+    const ev = (type, payload) => send({ method: 'session/event', params: { sessionId, type, payload } });
+    ev('model_streaming', { kind: 'text_delta', delta: 'window text' });
+    ev('subagent_stopped', { agentId: 'agent_bg_1', agentType: 'general-purpose', background: true, childSessionId: 'sess_subagent_agent_bg_1', parentToolCallId: 'call_agent_bg', status: 'completed', totalDurationMs: 1500, totalToolUseCount: 2, totalTokens: 300 });
+    // A turn-ending event of the earlier turn, straggling in.
+    ev('turn_complete', { usage: { inputTokens: 1, outputTokens: 1 } });
+    send({ id: msg.id, result: {} });
     return;
   }
 
@@ -233,6 +251,59 @@ rl.on('line', (line) => {
     }
     if (readMode() === 'send-fail') {
       send({ method: 'session/event', params: { sessionId, type: 'turn.failed', payload: { error: { message: 'provider auth failed', attribution: { statusCode: 401, reason: 'auth_failed' } } } } });
+      return;
+    }
+    if (readMode() === 'subagent-run-crash') {
+      // The engine dies while a turn is still in flight with an agent running.
+      const ev = (type, payload) => send({ method: 'session/event', params: { sessionId, type, payload } });
+      const agent = { agentId: 'agent_run_1', agentType: 'general-purpose', background: false, childSessionId: 'sess_subagent_agent_run_1', parentToolCallId: 'call_agent_run' };
+      ev('model_streaming', { kind: 'tool_call', toolCallId: 'call_agent_run', toolName: 'Agent', input: { description: 'Audit', prompt: 'look', subagent_type: 'general-purpose' } });
+      ev('subagent_spawned', { ...agent, description: 'Audit', prompt: 'look', status: 'running' });
+      setTimeout(() => process.exit(1), 100);
+      return;
+    }
+    if (readMode() === 'handover-window') {
+      send({ method: 'session/event', params: { sessionId, type: 'model_streaming', payload: { kind: 'text_delta', delta: 'hi there' } } });
+      send({ method: 'session/event', params: { sessionId, type: 'turn_complete', payload: { usage: { inputTokens: 3, outputTokens: 4 } } } });
+      return;
+    }
+    if (readMode() === 'subagent-bg' || readMode() === 'subagent-bg-crash' || readMode() === 'subagent-bg-permission' || readMode() === 'subagent-bg-permission-orphan') {
+      // A background agent: the engine announces the Agent call, reports the
+      // spawn on the parent session once the child is ready, returns the
+      // launch acknowledgement as the tool result and ends the turn. The
+      // agent keeps working and reports its stop well after the turn settled
+      // — or, in the crash variant, the engine dies with the agent still
+      // running and never reports.
+      const crash = readMode() === 'subagent-bg-crash';
+      const asksPermission = readMode() === 'subagent-bg-permission' || readMode() === 'subagent-bg-permission-orphan';
+      const orphansPermission = readMode() === 'subagent-bg-permission-orphan';
+      const ev = (type, payload) => send({ method: 'session/event', params: { sessionId, type, payload } });
+      const agent = { agentId: 'agent_bg_1', agentType: 'general-purpose', background: true, childSessionId: 'sess_subagent_agent_bg_1', parentToolCallId: 'call_agent_bg' };
+      ev('model_streaming', { kind: 'tool_call', toolCallId: 'call_agent_bg', toolName: 'Agent', input: { description: 'Review the fix', prompt: 'look', run_in_background: true, subagent_type: 'general-purpose' } });
+      ev('subagent_spawned', { ...agent, description: 'Review the fix', prompt: 'look', status: 'running' });
+      ev('model_streaming', { kind: 'tool_result', toolCallId: 'call_agent_bg', result: { success: true, content: 'Async agent launched successfully.\\nagentId: agent_bg_1' } });
+      ev('turn_complete', { usage: { inputTokens: 3, outputTokens: 4 } });
+      setTimeout(() => {
+        if (crash) {
+          process.exit(1);
+        }
+        if (asksPermission) {
+          // The engine rewrites a subagent's request to the PARENT session id
+          // and tags it with the subagent as its origin; the parent turn is
+          // over by now.
+          send({ id: 'server-perm-bg', method: 'interaction/requestPermission', params: {
+            requestId: orphansPermission ? 'perm_bg_orphan' : 'perm_bg_1', sessionId, toolCallId: 'call_child_bash', toolName: 'Bash',
+            input: { command: 'touch /tmp/bg' }, reason: 'Tool Bash requires approval', riskLevel: 'medium',
+            origin: { kind: 'subagent', agentId: 'agent_bg_1', agentType: 'general-purpose', description: 'Review the fix', childSessionId: 'sess_subagent_agent_bg_1', parentSessionId: sessionId, parentToolCallId: 'call_agent_bg' },
+          } });
+          if (orphansPermission) {
+            // The agent ends while its request is still unanswered.
+            setTimeout(() => ev('subagent_stopped', { ...agent, status: 'stopped', totalDurationMs: 10 }), 200);
+          }
+          return;
+        }
+        ev('subagent_stopped', { ...agent, status: 'completed', totalDurationMs: 1500, totalToolUseCount: 2, totalTokens: 300 });
+      }, 400);
       return;
     }
     if (readMode() === 'perm-bridge') {
@@ -1061,4 +1132,286 @@ test('runtime delivers native tool outputs before turn completion without fetchi
   const nextTextIndex = messages.findIndex((message) => message.kind === 'stream_delta');
   for (const message of results) assert.ok(messages.indexOf(message) < nextTextIndex);
   assert.equal(messages.at(-1)?.kind, 'complete');
+});
+
+test('a background agent shows as a running Agent card, is listed as background work, and settles after the turn', async () => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-bg\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const { messages, writer } = createWriter();
+
+  assert.deepEqual(runtime.listBackgroundWork(), []);
+
+  const result = await runtime.run('review it', { sessionId: 'app-sess-subagent', cwd: stubDir }, writer, context);
+  assert.deepEqual(result, { sessionId: 'sess_stub_1', success: true });
+
+  // The launch renders through the shared subagent card: the engine's
+  // `Agent` call reaches the client under that name, and the spawn event marks
+  // it running on that very call.
+  const launch = messages.find((message) => message.kind === 'tool_use');
+  assert.equal(launch?.toolName, 'Agent');
+  assert.equal(launch?.toolId, 'call_agent_bg');
+  const started = messages.find((message) => message.kind === 'task_status' && message.event === 'started');
+  assert.equal(started?.taskId, 'agent_bg_1');
+  assert.equal(started?.toolUseId, 'call_agent_bg');
+  assert.ok(messages.indexOf(started!) < messages.findIndex((message) => message.kind === 'complete'));
+
+  // The turn is over but the agent is not: the running-sessions poll must
+  // still see it.
+  const listed = runtime.listBackgroundWork();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].sessionId, 'app-sess-subagent');
+  assert.deepEqual(listed[0].tasks.map((task) => [task.taskId, task.toolUseId, task.taskType, task.description]), [
+    ['agent_bg_1', 'call_agent_bg', 'local_agent', 'Review the fix'],
+  ]);
+
+  // The stop lands after the run settled. The lifecycle watcher the run left
+  // behind still forwards it, so the open page settles the card without a
+  // reload, and the agent leaves the background-work list.
+  const deadline = Date.now() + 3000;
+  while (runtime.listBackgroundWork().length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(runtime.listBackgroundWork(), [], 'the stopped agent is retired');
+  const stopped = messages.find((message) => message.kind === 'task_status' && message.status === 'completed');
+  assert.equal(stopped?.toolUseId, 'call_agent_bg');
+  assert.deepEqual(stopped?.usage, { totalTokens: 300, toolUses: 2, durationMs: 1500 });
+});
+
+test('the composer strip lists a background agent past the turn, without a stop the runtime cannot honour', async () => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-bg\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const { messages, writer } = createWriter();
+  await runtime.run('review it', { sessionId: 'app-sess-strip', cwd: stubDir }, writer, context);
+
+  // The agent outlives the turn: a page that subscribes now gets it back from
+  // the runtime, and is told the session has no run left to stop.
+  const stripTask = { id: 'call_agent_bg', toolName: 'Agent', command: 'Review the fix', description: 'Review the fix' };
+  const withoutStart = (tasks: any[]) => tasks.map(({ startedAt: _startedAt, ...task }) => task);
+  assert.deepEqual(withoutStart(runtime.backgroundTasks.list('app-sess-strip')), [stripTask]);
+  assert.equal(runtime.backgroundTasks.canInterrupt('app-sess-strip'), false);
+
+  const deadline = Date.now() + 3000;
+  while (runtime.listBackgroundWork().length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  // Spawned mid-turn, the agent's work stops with the turn; once the turn
+  // has ended there is no run to stop, which the strip must say before the
+  // page sees the turn complete.
+  const strips = messages.filter((message) => message.kind === 'status' && message.text === 'background_tasks');
+  assert.deepEqual(
+    strips.map((message) => [withoutStart(message.backgroundTasks ?? []), message.canInterrupt]),
+    [[[stripTask], true], [[stripTask], false], [[], false]],
+  );
+  assert.ok(messages.indexOf(strips[1]) < messages.findIndex((message) => message.kind === 'complete'));
+  assert.deepEqual(runtime.backgroundTasks.list('app-sess-strip'), []);
+});
+
+test('a new run takes the session over from the lifecycle watcher: a late stop is forwarded exactly once', async () => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-bg\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const first = createWriter();
+  await runtime.run('review it', { sessionId: 'app-sess-handover', cwd: stubDir }, first.writer, context);
+  assert.equal(runtime.listBackgroundWork().length, 1, 'the agent outlives the first turn');
+  const forwardedToFirstAtHandover = first.messages.filter((message) => message.kind === 'task_status').length;
+
+  // The user sends again before the agent reports. The engine's stop lands
+  // either during this run (its listener owns the stream) or after it (the
+  // re-armed watcher does) — never through both, and never through the
+  // writer of the turn that is over.
+  fsSync.writeFileSync(modeFilePath, 'ok\n');
+  const second = createWriter();
+  await runtime.run('and again', { sessionId: 'app-sess-handover', cwd: stubDir }, second.writer, context);
+
+  const deadline = Date.now() + 3000;
+  while (runtime.listBackgroundWork().length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(runtime.listBackgroundWork(), [], 'the stopped agent is retired');
+
+  const settledInSecond = second.messages.filter((message) => message.kind === 'task_status' && message.status === 'completed');
+  assert.equal(settledInSecond.length, 1, 'the stop reaches the live writer once');
+  assert.equal(
+    first.messages.filter((message) => message.kind === 'task_status').length,
+    forwardedToFirstAtHandover,
+    'the superseded turn\'s writer receives nothing after the handover',
+  );
+});
+
+test('a stop landing while a new run is still setting up reaches only the new run, once', async () => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-bg\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const first = createWriter();
+  await runtime.run('review it', { sessionId: 'app-sess-window', cwd: stubDir }, first.writer, context);
+  assert.equal(runtime.listBackgroundWork().length, 1, 'the agent outlives the first turn');
+  const firstCount = first.messages.length;
+
+  // The engine reports the stop while the next run is between its start and
+  // its prompt; the first turn's watcher must not take it.
+  fsSync.writeFileSync(modeFilePath, 'handover-window\n');
+  const second = createWriter();
+  await runtime.run('and again', { sessionId: 'app-sess-window', cwd: stubDir }, second.writer, context);
+
+  assert.equal(first.messages.length, firstCount, 'the finished turn\'s writer hears nothing after the handover');
+  // The straggling turn-end belongs to the earlier turn: the new run still
+  // waits for its own, so its reply arrives before its completion.
+  const replyAt = second.messages.findIndex((message) => message.content === 'hi there');
+  const completeAt = second.messages.findIndex((message) => message.kind === 'complete');
+  assert.ok(replyAt >= 0 && replyAt < completeAt, 'the new run completes on its own turn, not on the earlier one');
+  const settled = second.messages.filter((message) => message.kind === 'task_status' && message.status === 'completed');
+  assert.equal(settled.length, 1, 'the stop reaches the new run\'s writer exactly once');
+  assert.deepEqual(runtime.listBackgroundWork(), []);
+});
+
+test('a superseded run forwards nothing from the stream once a newer run owns the session', async () => {
+  fsSync.writeFileSync(modeFilePath, 'abort-ok\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const first = createWriter();
+  // The superseded run ends with an error; collect it where it happens.
+  const firstRun = runtime.run('stream', { sessionId: 'app-sess-superseded', cwd: stubDir }, first.writer, context)
+    .then(() => null, (error: unknown) => error);
+  for (let i = 0; i < 100 && !first.messages.some((message) => message.kind === 'stream_delta'); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(first.messages.some((message) => message.kind === 'stream_delta'), 'the first run must be streaming');
+
+  fsSync.writeFileSync(modeFilePath, 'handover-window\n');
+  const second = createWriter();
+  await runtime.run('take over', { sessionId: 'app-sess-superseded', cwd: stubDir }, second.writer, context);
+  assert.match(String(await firstRun), /superseded/);
+
+  const windowText = (messages: NormalizedMessage[]) => messages.filter((message) => message.content === 'window text').length;
+  assert.equal(windowText(second.messages), 1, 'the new run forwards what arrived during its setup');
+  assert.equal(windowText(first.messages), 0, 'the superseded run must not forward a second copy');
+
+  // Stops the stub's ticking stream so it does not outlive the test.
+  await protocolClient.sendRequest('session/stop', { sessionId: 'sess_stub_1' });
+});
+
+test('a setup failure in a new run releases its listener and hands the session back to the watcher', async (t) => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-bg\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const first = createWriter();
+  await runtime.run('review it', { sessionId: 'app-sess-setup-fail', cwd: stubDir }, first.writer, context);
+  assert.equal(runtime.listBackgroundWork().length, 1, 'the agent outlives the first turn');
+
+  // Count the listeners attached to the engine session from here on.
+  const attached = new Set<unknown>();
+  const originalAdd = protocolClient.addSessionListener.bind(protocolClient);
+  const originalRemove = protocolClient.removeSessionListener.bind(protocolClient);
+  t.mock.method(protocolClient, 'addSessionListener', (sessionId: string, listener: unknown) => {
+    attached.add(listener);
+    return originalAdd(sessionId, listener as never);
+  });
+  t.mock.method(protocolClient, 'removeSessionListener', (sessionId: string, listener: unknown) => {
+    attached.delete(listener);
+    return originalRemove(sessionId, listener as never);
+  });
+
+  // The next run dies during setup (model catalog lookup), before any prompt.
+  const failing: ProviderRuntimeContext = {
+    ...context,
+    getProviderModels: async () => { throw new Error('catalog unavailable'); },
+  };
+  const second = createWriter();
+  await assert.rejects(
+    runtime.run('and again', { sessionId: 'app-sess-setup-fail', cwd: stubDir }, second.writer, failing),
+    /catalog unavailable/,
+  );
+
+  // The agent is still outstanding, so the watcher is back on the session and
+  // delivers its stop once, to the writer of the run that handed it over.
+  const deadline = Date.now() + 3000;
+  while (runtime.listBackgroundWork().length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(runtime.listBackgroundWork(), [], 'the stopped agent is retired');
+  assert.equal(second.messages.filter((m) => m.kind === 'task_status' && m.status === 'completed').length, 1);
+
+  // Once the watcher has stood down, nothing of the failed run still listens.
+  assert.equal(attached.size, 0, 'the failed run leaked its session listener');
+});
+
+test('a background agent asking for approval after its turn ended still reaches the page, and the answer reaches the engine', async () => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-bg-permission\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const { messages, writer } = createWriter();
+  await runtime.run('review it', { sessionId: 'app-sess-bg-perm', cwd: stubDir }, writer, context);
+
+  for (let i = 0; i < 100 && !messages.some((msg) => msg.kind === 'permission_request'); i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const card = messages.find((msg) => msg.kind === 'permission_request');
+  assert.ok(card, 'the approval card must reach the page although no turn is running');
+  assert.equal(card.requestId, 'perm_bg_1');
+  assert.deepEqual((card.context as { subagent?: unknown }).subagent, { toolUseId: 'call_agent_bg', description: 'Review the fix' });
+  assert.deepEqual((zcodeRuntimePermissions.listPending('app-sess-bg-perm') as Array<{ requestId: string }>).map((entry) => entry.requestId), ['perm_bg_1']);
+
+  zcodeRuntimePermissions.resolve('perm_bg_1', { allow: true });
+  const deadline = Date.now() + 3000;
+  while (runtime.listBackgroundWork().length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const answer = readStubLog().filter((entry) => entry.name === 'perm_answer' && (entry.value as { id?: string }).id === 'server-perm-bg');
+  assert.equal(answer.length, 1);
+  assert.deepEqual((answer[0].value as { result: unknown }).result, { decision: 'allow' });
+  assert.equal(messages.filter((msg) => msg.kind === 'permission_cancelled').length, 1, 'retracted once when answered, not again when the agent stops');
+});
+
+test('an approval card is retracted when its agent stops before the user answered', async () => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-bg-permission-orphan\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const { messages, writer } = createWriter();
+  await runtime.run('review it', { sessionId: 'app-sess-orphan', cwd: stubDir }, writer, context);
+
+  const deadline = Date.now() + 4000;
+  while (!messages.some((msg) => msg.kind === 'permission_cancelled') && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+  }
+  assert.equal(messages.filter((msg) => msg.kind === 'permission_request').length, 1);
+  assert.equal(messages.filter((msg) => msg.kind === 'permission_cancelled').length, 1, 'the dead agent\'s card is taken down');
+  assert.deepEqual(zcodeRuntimePermissions.listPending('app-sess-orphan'), []);
+  // A late answer to the retracted card changes nothing.
+  zcodeRuntimePermissions.resolve('perm_bg_orphan', { allow: true });
+  assert.equal(messages.filter((msg) => msg.kind === 'permission_cancelled').length, 1);
+});
+
+// Last: both crash modes kill the shared stub subprocess.
+test('an engine crash settles the agents the watcher was waiting on as stopped, so no card spins', async () => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-bg-crash\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const { messages, writer } = createWriter();
+  await runtime.run('review it', { sessionId: 'app-sess-bg-crash', cwd: stubDir }, writer, context);
+  assert.equal(runtime.listBackgroundWork().length, 1, 'the agent is tracked once the turn ends');
+
+  // The engine dies with the agent still running. Nothing can report it any
+  // more, so the page must be told it stopped and it must leave the list.
+  const deadline = Date.now() + 4000;
+  while (runtime.listBackgroundWork().length > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(runtime.listBackgroundWork(), [], 'the dead engine\'s agent is retired');
+  const settled = messages.filter((message) => message.kind === 'task_status' && message.event === 'notification');
+  assert.deepEqual(settled.map((message) => [message.toolUseId, message.taskId, message.status]), [
+    ['call_agent_bg', 'agent_bg_1', 'stopped'],
+  ]);
+  assert.equal(settled[0].usage, undefined, 'no usage is invented for an agent that never reported');
+  const lastStrip = messages.filter((message) => message.kind === 'status' && message.text === 'background_tasks').at(-1);
+  assert.deepEqual(lastStrip?.backgroundTasks, [], 'the strip empties with the dead engine');
+});
+
+test('an engine crash mid-turn settles the agents the run was waiting on as stopped', async () => {
+  fsSync.writeFileSync(modeFilePath, 'subagent-run-crash\n');
+  const runtime = new ZCodeRuntimeProvider();
+  const { messages, writer } = createWriter();
+  const result = await runtime.run('audit it', { sessionId: 'app-sess-run-crash', cwd: stubDir }, writer, context);
+  assert.equal((result as { success: boolean }).success, false);
+
+  const settled = messages.filter((message) => message.kind === 'task_status' && message.event === 'notification');
+  assert.deepEqual(settled.map((message) => [message.toolUseId, message.status]), [['call_agent_run', 'stopped']]);
+  assert.ok(
+    messages.indexOf(settled[0]) < messages.findIndex((message) => message.kind === 'complete'),
+    'the card settles before the page sees the run complete',
+  );
+  assert.deepEqual(runtime.listBackgroundWork(), []);
 });

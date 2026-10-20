@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 
 import type { WebSocket } from 'ws';
 
+import { isValidReplaySeq, isValidStreamEpoch } from '../../../../shared/protocol/frameNarrowing.js';
+
 import { sessionsDb } from '@/modules/database/index.js';
 import { providerModelsService, sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
@@ -85,6 +87,10 @@ export type ProviderRuntimeGateway = {
   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
   getPendingApprovalsForSession(sessionId: string): unknown[];
   getBackgroundTasksForSession?(sessionId: string): ActiveBackgroundTask[];
+  /** False when the session's background work is held by a runtime that can no longer stop it. */
+  canInterruptBackgroundWork?(sessionId: string): boolean;
+  /** False when the provider takes a new turn alongside the session's background work. */
+  backgroundWorkQueuesInput?(provider: LLMProvider, sessionId: string): boolean;
 };
 
 type ChatWebSocketDependencies = {
@@ -110,6 +116,12 @@ function readClientRuntimeOptions(value: unknown): AnyRecord {
   return Object.fromEntries(
     Object.entries(value).filter(([key]) => !CLIENT_RESERVED_RUNTIME_OPTIONS.has(key)),
   );
+}
+
+/** The session title the client put in its send options, if any. */
+function readSessionSummary(options: unknown): string | null {
+  const summary = options && typeof options === 'object' ? (options as AnyRecord).sessionSummary : undefined;
+  return typeof summary === 'string' && summary.trim() ? summary.trim() : null;
 }
 
 /**
@@ -299,6 +311,8 @@ async function dispatchRun(
     providerSessionId: session.provider_session_id,
     connection: ws,
     userId,
+    // The composer sends the title it shows; a stored name is the fallback.
+    sessionName: readSessionSummary(data.options) ?? session.custom_name,
   });
 
   if (!run) {
@@ -634,6 +648,15 @@ async function handleChatStopTask(
   }
 }
 
+/** Whether the session's provider holds a new message back while background work runs; true when unknown. */
+function readBackgroundWorkQueuesInput(sessionId: string, dependencies: ChatWebSocketDependencies): boolean {
+  const provider = sessionsDb.getSessionById(sessionId)?.provider;
+  if (!provider || !dependencies.runtime.backgroundWorkQueuesInput) {
+    return true;
+  }
+  return dependencies.runtime.backgroundWorkQueuesInput(provider as LLMProvider, sessionId);
+}
+
 /**
  * Handles `chat.subscribe`: for each requested session, reports whether a run
  * is processing, re-attaches the live stream to this socket, replays missed
@@ -662,9 +685,13 @@ function handleChatSubscribe(
     }
 
     const lastSeqRaw = (target as AnyRecord).lastSeq;
-    const lastSeq = typeof lastSeqRaw === 'number' && Number.isFinite(lastSeqRaw)
-      ? Math.max(0, Math.floor(lastSeqRaw))
-      : 0;
+    const epoch = (target as AnyRecord).streamEpoch;
+    if ((lastSeqRaw !== undefined && !isValidReplaySeq(lastSeqRaw, true))
+      || ('streamEpoch' in target && !isValidStreamEpoch(epoch))) {
+      sendProtocolError(ws, 'INVALID_SUBSCRIPTION', 'Invalid replay cursor.', sessionId);
+      continue;
+    }
+    const lastSeq = lastSeqRaw ?? 0;
 
     const isProcessing = chatRunRegistry.isProcessing(sessionId);
 
@@ -674,9 +701,13 @@ function handleChatSubscribe(
     // keeps producing events through the same writer (task progress, the
     // turn the CLI pushes when a task reports), so a tab opened during that
     // work attaches too; the registry keeps the run while the work lasts.
-    if (isProcessing || dependencies.runtime.hasBackgroundWork(sessionId)) {
-      chatRunRegistry.attachConnection(sessionId, ws);
-    }
+    // The socket joins the session's audience whenever there is one: a
+    // resident engine can report after its run is over, and that report
+    // travels on the session's channel. The run itself only keeps the socket
+    // while it is running or while its session still has background work.
+    chatRunRegistry.attachConnection(sessionId, ws, {
+      includeRun: isProcessing || dependencies.runtime.hasBackgroundWork(sessionId),
+    });
 
     // Pending approvals are tracked under the app session id inside the
     // Claude runtime, so they can be looked up directly.
@@ -686,17 +717,23 @@ function handleChatSubscribe(
     // `lastSeq` is the session's authoritative watermark (clients realign to
     // it); `stale` tells the client its `lastSeq` predates the replay buffer
     // and it must refresh history over REST instead of trusting the replay.
-    const replay = chatRunRegistry.replayEvents(sessionId, lastSeq);
+    let replay = chatRunRegistry.replayEvents(sessionId, lastSeq);
+    const changedEpoch = epoch !== undefined && epoch !== replay.streamEpoch;
+    if (changedEpoch) replay = chatRunRegistry.replayEvents(sessionId, 0);
 
     sendJson(ws, {
       kind: 'chat_subscribed',
       sessionId,
       isProcessing,
       lastSeq: replay.lastSeq,
-      stale: replay.stale,
+      streamEpoch: replay.streamEpoch,
+      replayFromSeq: isProcessing ? replay.replayFromSeq : replay.lastSeq + 1,
+      stale: changedEpoch || replay.stale || (!isProcessing && lastSeq < replay.lastSeq),
       pendingPermissions,
       backgroundTasks,
       backgroundWorkPending: dependencies.runtime.isBackgroundWorkPending(sessionId),
+      backgroundCanInterrupt: dependencies.runtime.canInterruptBackgroundWork?.(sessionId) ?? true,
+      backgroundWorkQueuesInput: readBackgroundWorkQueuesInput(sessionId, dependencies),
       timestamp: new Date().toISOString(),
     });
 
