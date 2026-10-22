@@ -124,6 +124,12 @@ export type {
 export type SessionBackgroundWork = {
   sessionId: string;
   tasks: BackgroundTaskSummary[];
+  /**
+   * When the work the entry stands for began, for an entry with no task to
+   * date it: a report turn the engine runs on its own. The running-sessions
+   * poll otherwise dates the entry by its earliest task.
+   */
+  startedAt?: number;
 };
 
 export type {
@@ -373,6 +379,53 @@ export type ProviderRuntimePermissionGateway = {
   listPending(sessionId: string): unknown[];
 };
 
+//----------------- CODEX AUTOMATIC SESSION TITLES ------------
+/**
+ * Immutable identity captured after a successful normal user turn. Providers'
+ * runtime, title scheduler and title client use it to reject late work after
+ * thread replacement. `models` is the runtime's discovered catalog snapshot;
+ * `initialPrompt` is supplied only when this turn created the native thread.
+ */
+export type CodexSessionTitleTarget = {
+  appSessionId: string;
+  nativeThreadId: string;
+  /** Zero requests a manager-owned transient worker after a short chat connection. */
+  generation: number;
+  /** Manager record key when a transient worker serves a different app-session key. */
+  residentKey?: string;
+  workingDirectory: string;
+  model: string;
+  models: ProviderModelsDefinition;
+  initialPrompt?: string;
+};
+
+// ---------------------------
+//----------------- RESIDENT TASK BRIDGE ------------
+/** Trusted process identity issued by providers and verified by task-continuations. */
+export type TaskBridgeCredentialContext = {
+  userId: string | number;
+  appSessionId: string;
+  generation: number;
+};
+
+/**
+ * A tool invocation observed on the owning resident connection, never supplied
+ * by the HTTP caller. Providers attach the current run capability only after
+ * binding its native turn; task-continuations compares arguments and generation.
+ */
+export type TaskBridgeEngineCall = {
+  appSessionId: string;
+  generation: number;
+  threadId: string;
+  turnId: string | null;
+  callId: string;
+  server: string;
+  tool: string;
+  arguments: Record<string, unknown>;
+  runToken: string;
+};
+
+// ---------------------------
 /**
  * Provider-scoped application capabilities supplied to a runtime for one run.
  *
@@ -420,15 +473,13 @@ export type ProviderRuntimeContext = {
    * cannot take the round's authority from the process. It takes it from the
    * engine call it observed, and this is how that call reaches the host.
    */
-  registerEngineToolCall?(call: {
-    appSessionId: string;
-    threadId: string;
-    turnId: string | null;
-    callId: string;
-    server: string;
-    tool: string;
-    runToken: string;
-  }): void;
+  registerEngineToolCall?(call: TaskBridgeEngineCall): void;
+  /**
+   * The engine's transcript file for an app session, or null when it is not
+   * known yet. A runtime whose process outlives a turn reads it to notice
+   * another process continuing the conversation in the meantime.
+   */
+  resolveTranscriptPath?(appSessionId: string): string | null;
   /** Optional provider hook for clearing incomplete real-time state at a terminal run outcome. */
   resetLiveMessageState?(sessionId: string): void;
   isProviderInstalled(): Promise<boolean>;

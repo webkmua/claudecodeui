@@ -306,6 +306,13 @@ export type SessionActivity = {
   background?: boolean;
   /** The background tasks the session still has running, with or without a response in flight. */
   tasks?: BackgroundTaskSummary[];
+  /**
+   * The round was submitted and the engine has not started its turn yet, so
+   * the conversation waits for the engine instead of working on the round.
+   */
+  queued?: boolean;
+  /** The engine runs a turn of its own, such as a background report. */
+  reporting?: boolean;
 };
 
 /** Every busy session, keyed by session id. Read it to tell whether a session is busy; check `background` to tell how. */
@@ -318,7 +325,16 @@ export type SessionActivityMap = ReadonlyMap<string, SessionActivity>;
  */
 export type MarkSessionProcessing = (
   sessionId?: string | null,
-  activity?: { statusText?: string | null; canInterrupt?: boolean; background?: boolean; awaitingApproval?: boolean },
+  activity?: {
+    statusText?: string | null;
+    canInterrupt?: boolean;
+    background?: boolean;
+    awaitingApproval?: boolean;
+    /** The engine holds the round and has not started its turn yet. */
+    queued?: boolean;
+    /** The engine runs a turn of its own, such as a background report. */
+    reporting?: boolean;
+  },
 ) => void;
 
 /** Clears the response phase by default, or only the background phase with `backgroundOnly`. `ifStartedBefore` guards stale response acknowledgements. */
@@ -353,6 +369,13 @@ export type SessionActivitySnapshot = {
   /** True when the server lists the session for its background tasks alone, with no chat run. */
   background?: boolean;
   tasks?: BackgroundTaskSummary[];
+  /**
+   * The engine holds the round and has not started its turn yet, so the
+   * conversation waits for the engine instead of working on the round.
+   */
+  queued?: boolean;
+  /** The engine runs a turn of its own, such as a background report. */
+  reporting?: boolean;
 };
 
 // ---------------------------

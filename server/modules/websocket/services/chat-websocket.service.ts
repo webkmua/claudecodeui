@@ -82,6 +82,8 @@ export type ProviderRuntimeGateway = {
   stopBackgroundTask(provider: LLMProvider, sessionId: string, taskId: string): Promise<boolean>;
   /** Whether a provider runtime still holds background work for the session after its turn ended. */
   hasBackgroundWork(sessionId: string): boolean;
+  /** Full provider activity, including resident initialization, reports and approvals. */
+  hasSessionWork?(sessionId: string): boolean;
   /** Narrower than `hasBackgroundWork`: only work whose end the runtime broadcasts, including the reply after it. */
   isBackgroundWorkPending(sessionId: string): boolean;
   resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
@@ -369,6 +371,9 @@ async function dispatchRun(
     sessionId,
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
+    // The conversation's later turns come through here too, so a runtime may
+    // keep its engine process alive for them (Claude's idle residency).
+    residentBetweenTurns: true,
   };
 
   let failure: string | null = null;
@@ -437,6 +442,9 @@ async function dispatchRun(
 
   const outcome = readObjectRecord(runtimeOutcome);
   const terminalStatus = outcome?.terminalStatus;
+  if (extraRuntimeOptions.taskContinuation && outcome?.busy === true && !outcome.engineTurnId) {
+    return { started: false, busy: true, error: 'The engine is busy; the tool result has not been submitted.' };
+  }
   return {
     started: true,
     error: failure,
@@ -843,6 +851,10 @@ export async function runDetachedChatTurn(
   const provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
     return { started: false, error: `Provider "${provider}" is not available.` };
+  }
+
+  if (input.taskContinuation && dependencies.runtime.hasSessionWork?.(input.sessionId)) {
+    return { started: false, busy: true, error: 'The conversation still has engine work; task delivery will wait.' };
   }
 
   const activeRun = chatRunRegistry.getRun(input.sessionId);

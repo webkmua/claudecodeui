@@ -26,11 +26,13 @@ import {
  * One session the running-sessions poll reports as busy.
  *
  * A chat run in progress is listed as before. A session whose turn has ended
- * but whose background tasks are still outstanding is listed with
- * `background: true` and `canInterrupt: false`: the composer stays usable
- * (the runtime accepts a new turn while the work runs) and there is no run to
- * abort — a task is stopped by id through `chat.stop-task` instead. `tasks`
- * rides along on both kinds whenever the session has any.
+ * but whose engine still works in it — background tasks, or a report turn the
+ * engine started on its own — is listed with `background: true`: the composer
+ * stays usable (the runtime accepts a new turn while the work runs). There is
+ * no run to abort, so `canInterrupt` is what the runtime's
+ * `backgroundTasks.canInterrupt` says `chat.abort` can still stop (false when
+ * the runtime does not say); a task is stopped by id through `chat.stop-task`.
+ * `tasks` rides along on both kinds whenever the session has any.
  *
  * A turn driven outside CloudCLI — the Claude CLI in the Shell view, or a
  * terminal the user opened themselves — is listed the same way, with
@@ -43,9 +45,16 @@ type RunningSessionEntry = {
   startedAt: number;
   lastSeq: number;
   background?: true;
-  canInterrupt?: false;
+  canInterrupt?: boolean;
   statusText?: string;
   tasks?: BackgroundTaskSummary[];
+  /**
+   * The round was submitted and the engine has not started its turn yet, so
+   * the conversation is waiting for the engine rather than working.
+   */
+  queued?: boolean;
+  /** The engine is running a turn of its own, such as a background report. */
+  reporting?: boolean;
 };
 
 type CreateAppSessionResult = {
@@ -336,7 +345,7 @@ export const sessionsService = {
     const runningById = new Map(entries.map((entry) => [entry.sessionId, entry]));
 
     for (const provider of providerRegistry.listProviders()) {
-      for (const { sessionId, tasks } of provider.runtime.listBackgroundWork?.() ?? []) {
+      for (const { sessionId, tasks, startedAt } of provider.runtime.listBackgroundWork?.() ?? []) {
         const running = runningById.get(sessionId);
         if (running) {
           running.tasks = tasks;
@@ -346,12 +355,14 @@ export const sessionsService = {
           sessionId,
           provider: provider.id,
           startedAt: tasks.length ? Math.min(...tasks.map((task) => task.startedAt))
-            : chatRunRegistry.getRun(sessionId)?.startedAt ?? Date.now(),
+            : startedAt ?? chatRunRegistry.getRun(sessionId)?.startedAt ?? Date.now(),
           // The completed run stays in the registry for a while, and a client
           // that subscribes with its lastSeq replays the tail it missed.
           lastSeq: chatRunRegistry.getRun(sessionId)?.lastSeq ?? 0,
           background: true,
-          canInterrupt: false,
+          // Only the runtime knows whether `abort` can still reach this work
+          // (an OpenCode report turn can be stopped, a lone command cannot).
+          canInterrupt: provider.runtime.backgroundTasks?.canInterrupt?.(sessionId) ?? false,
           tasks,
         });
       }
@@ -380,7 +391,16 @@ export const sessionsService = {
       runningById.set(session.session_id, entries[entries.length - 1]);
     }
 
-    return entries;
+    // The engine is the only one that knows whether it picked a queued input
+    // up, so the entry says whether the conversation is waiting for the engine
+    // or working on the round.
+    return entries.map((entry) => {
+      const activity = providerRuntimeService.getSessionActivity(entry.sessionId);
+      if (!activity) {
+        return entry;
+      }
+      return { ...entry, queued: activity.queued, reporting: activity.reporting };
+    });
   },
 
   /**
@@ -432,6 +452,14 @@ export const sessionsService = {
 
     const session = sessionsDb.getSessionById(sessionId);
     return session ? session.provider_session_id : sessionId;
+  },
+
+  /**
+   * The engine transcript recorded for an app session, or null before the
+   * session synchronizer has indexed it.
+   */
+  resolveTranscriptPath(sessionId: string): string | null {
+    return sessionsDb.getSessionById(sessionId)?.jsonl_path ?? null;
   },
 
   /**
@@ -895,10 +923,11 @@ export const sessionsService = {
     let keepAdmissionClosed = false;
     try {
       if (providerRuntimeService.hasSessionWork(resolvedSessionId)) {
-        throw new AppError('This conversation is still working. Stop it before archiving it.', {
-          code: 'SESSION_HAS_ACTIVE_WORK',
-          statusCode: 409,
-        });
+        throw new AppError(
+          'This conversation still has work running — a background task or a report the engine is still making. '
+          + 'Wait for it to finish, or stop it, before archiving the conversation.',
+          { code: 'SESSION_HAS_ACTIVE_WORK', statusCode: 409 },
+        );
       }
       // An idle resident process is closed with the conversation, so the
       // engine does not keep working for a session that is gone. The

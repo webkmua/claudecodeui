@@ -39,11 +39,14 @@ import {
   completeCodexResidentRound,
   isCodexResidentSessionAdmissionClosed,
   isCodexResidentSessionBusy,
+  listCodexReportingOnlySessions,
+  readCodexResidentSessionActivity,
   openCodexResidentSessionAdmission,
   releaseCodexResidentSession,
   releaseCodexResidentSessionResources,
   stopCodexResidentRound,
   submitCodexResidentRound,
+  type CodexResidentSession,
 } from '@/modules/providers/list/codex/codex-session-manager.js';
 import {
   buildCodexSubagentAgentRow,
@@ -54,6 +57,7 @@ import {
   type CodexThreadItem,
 } from '@/modules/providers/list/codex/codex-thread-items.js';
 import { createBackgroundTasksStatusMessage, createTaskStatusMessage } from '@/modules/providers/shared/background-work/task-status.js';
+import { codexSessionTitleService } from '@/modules/providers/services/codex-session-title.service.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import {
   appendFilesInputTag,
@@ -63,6 +67,10 @@ import {
   createNormalizedMessage,
   resolveCodexExecutionPolicy,
   resolveModelEffort,
+  AppError,
+  readObjectRecord,
+  CODEX_TASK_MCP_NAME,
+  CODEX_HOST_CREDENTIAL_ENV_NAMES,
 } from '@/shared/index.js';
 import type {
   AnyRecord,
@@ -71,9 +79,8 @@ import type {
   ProviderRuntimeWriter,
 } from '@/shared/index.js';
 import type { NormalizedMessage, SessionBackgroundWork } from '@/shared/types.js';
-import { readObjectRecord } from '@/shared/utils.js';
 
-const TASK_MCP_NAME = 'cloudcli_task_continuations';
+const TASK_MCP_NAME = CODEX_TASK_MCP_NAME;
 const TASK_API_URL_ENV = 'CLOUDCLI_TASK_API_URL';
 const TASK_API_KEY_ENV = 'CLOUDCLI_TASK_API_KEY';
 const TASK_RUN_CONTEXT_ENV = 'CLOUDCLI_TASK_RUN_CONTEXT';
@@ -146,7 +153,8 @@ type ActiveCodexSession = {
    * Ends the round: it interrupts a turn that already runs, or removes the
    * input that is still waiting in the engine's queue.
    */
-  stop: () => void;
+  /** Ends the round. Resolves once the engine confirmed what it did. */
+  stop: () => Promise<unknown>;
   /** Set once the server reports the turn; `turn/interrupt` needs it. */
   threadId: string | null;
   turnId: string | null;
@@ -163,21 +171,13 @@ const activeCodexSessions = new Map<string, ActiveCodexSession>();
  * the next message waits for its own turn, so it is off until the whole
  * delivery — background reports, task credentials, reclaim — is accepted.
  */
-const isResidentSessionsEnabled = (): boolean => process.env.CLOUDCLI_CODEX_RESIDENT === '1';
+const isResidentSessionsEnabled = (): boolean => process.env.CLOUDCLI_CODEX_RESIDENT !== '0';
 
 const DETACHED_COMMAND_ENV_ALLOWLIST = [
   'PATH', 'HOME', 'CODEX_HOME', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LC_ALL', 'LC_CTYPE',
   'TERM', 'USER', 'LOGNAME', 'SHELL', 'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME',
 ] as const;
-const TASK_CREDENTIAL_ENV_NAMES = [
-  'API_KEY',
-  'CLOUDCLI_TASK_API_KEY',
-  'CLOUDCLI_TASK_RUN_CONTEXT',
-  'CLOUDCLI_TASK_BRIDGE',
-  'CLOUDCLI_REGISTRATION_TOKEN',
-  'CLOUDCLI_TASK_TOKEN',
-  'JWT_SECRET',
-] as const;
+const TASK_CREDENTIAL_ENV_NAMES = CODEX_HOST_CREDENTIAL_ENV_NAMES;
 const DETACHED_COMMAND_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -350,7 +350,7 @@ type CodexEventTarget = {
    * the authority for a call from the engine call it observed rather than
    * from a secret the process carries.
    */
-  registerToolCall?: (call: { callId: string; server: string; tool: string }) => void;
+  registerToolCall?: (call: { callId: string; server: string; tool: string; arguments: Record<string, unknown> }) => void;
 };
 
 /** One `task_status` frame for a collab agent, folded by the client onto the card of `toolUseId`. */
@@ -471,7 +471,8 @@ function emitCodexItem(
     }
   }
   if (item.kind === 'mcp_tool_call') {
-    target.registerToolCall?.({ callId: item.id, server: item.server, tool: item.tool });
+    const args = readObjectRecord(item.toolArguments);
+    if (args) target.registerToolCall?.({ callId: item.id, server: item.server, tool: item.tool, arguments: args });
   }
   if (item.kind === 'subagent_activity') {
     emitCodexSubagentActivity(target, item, timestamp, backgroundWorkKey);
@@ -642,6 +643,8 @@ function settleCodexSessionAgents(
  * flight, and the card has to name the tool that waits.
  */
 const sessionApprovalSubjects = new Map<string, Map<string, { toolName: string; input: unknown }>>();
+/** Session approvals outlive any one borrower's round and are retracted on disposal. */
+const sessionApprovalIds = new Map<string, Set<string>>();
 
 /** The approval subjects of a session, created on first use. */
 function readSessionApprovalSubjects(appSessionId: string | null): Map<string, { toolName: string; input: unknown }> {
@@ -697,6 +700,12 @@ async function queryCodex(
     ? 'bypassPermissions'
     : taskApprovalPolicy === 'never' ? 'acceptEdits' : permissionMode;
   const { sandbox, approvalPolicy, sandboxPolicy } = resolveCodexExecutionPolicy(targetPermissionMode);
+  const toolOutputParam = options.toolOutput ?? (options.taskContinuation ? {
+      name: 'cloudcli_task_result',
+      output: typeof options.taskContinuation === 'string'
+        ? options.taskContinuation
+        : JSON.stringify(options.taskContinuation),
+    } : null);
   const taskExecutionContext = readObjectRecord(options.taskExecutionContext);
   const taskContinuationLifecycle = readObjectRecord(options.taskContinuationLifecycle);
   const onEngineTurnStarted = typeof taskContinuationLifecycle?.onEngineTurnStarted === 'function'
@@ -756,6 +765,7 @@ async function queryCodex(
   let connection: CodexAppServerConnection | null = null;
   let engineTurnId: string | null = null;
   let terminalStatus: 'completed' | 'failed' | 'interrupted' | 'unknown' = 'unknown';
+  let acceptanceUnknown = false;
   let acceptedTurnCallbackSent = false;
 
   const recordStartedTurn = (turnId: string | null): void => {
@@ -820,6 +830,9 @@ async function queryCodex(
    * terminal event, so a round's own events never travel the session's
    * publish entry.
    */
+  let residentGeneration: number | null = null;
+  let knownNativeName: string | null = null;
+  let residentRoundId: string | null = null;
   const roundTarget: CodexEventTarget = {
     appSessionId: sessionId || null,
     threadId: () => capturedSessionId,
@@ -827,11 +840,13 @@ async function queryCodex(
     deliver: (message) => sendMessage(ws, message),
     approvalSubjects,
     registerToolCall: (call) => {
-      if (!taskRunToken || !capturedSessionId) {
+      if (!taskRunToken || !capturedSessionId || residentGeneration === null) {
         return;
       }
       context.registerEngineToolCall?.({
         appSessionId: sessionId || capturedSessionId,
+        generation: residentGeneration,
+        arguments: call.arguments,
         threadId: capturedSessionId,
         turnId: engineTurnId,
         callId: call.callId,
@@ -898,15 +913,6 @@ async function queryCodex(
   const openApprovalIds = new Set<string>();
 
   /**
-   * The approvals a session opened for the requests the engine made with no
-   * round in flight.
-   *
-   * They belong to the session rather than to a round: a round that ends must
-   * not retract the approval the engine is still waiting for.
-   */
-  const sessionApprovalIds = new Map<string, Set<string>>();
-
-  /**
    * Puts one approval in front of the user and waits for the answer.
    *
    * Codex is blocked on the JSON-RPC request until this resolves, so the wait
@@ -918,6 +924,7 @@ async function queryCodex(
     params: AnyRecord,
     deliver: (message: NormalizedMessage) => void = (message) => sendMessage(ws, message),
     subjects: Map<string, { toolName: string; input: unknown }> = approvalSubjects,
+    ownedApprovalIds: Set<string> = openApprovalIds,
   ): Promise<ProviderPermissionDecision | null> => {
     const itemId = readNonEmptyString(params.itemId) ?? randomUUID();
     const requestId = randomUUID();
@@ -944,7 +951,7 @@ async function queryCodex(
         }
         settled = true;
         pendingCodexApprovals.delete(requestId);
-        openApprovalIds.delete(requestId);
+        ownedApprovalIds.delete(requestId);
         resolve(decision);
       };
 
@@ -956,7 +963,7 @@ async function queryCodex(
         input: subject?.input,
         receivedAt: new Date(),
       });
-      openApprovalIds.add(requestId);
+      ownedApprovalIds.add(requestId);
 
       deliver(createNormalizedMessage({
         kind: 'permission_request',
@@ -1038,7 +1045,7 @@ async function queryCodex(
    * they are only settled when the process itself is gone.
    */
   const settleAgentsWhenProcessIsGone = (): void => {
-    if (!isResidentSessionsEnabled() || residentProcessExited) {
+    if (residentGeneration === null || residentProcessExited) {
       settleOutstandingAgents();
     }
   };
@@ -1082,6 +1089,26 @@ async function queryCodex(
    * The events of a turn the engine started on its own never reach this
    * handler: a background report must not end the user's round.
    */
+  /**
+   * Announces what the engine is doing with the round.
+   *
+   * The page learns it from this frame instead of waiting for the next poll,
+   * so a round that waits for the engine says so at once.
+   */
+  const announceActivityState = (): void => {
+    const activity = readCodexResidentSessionActivity(residentKey);
+    if (!activity) {
+      return;
+    }
+    sendMessage(ws, createNormalizedMessage({
+      kind: 'status',
+      text: 'activity_state',
+      activityState: { queued: activity.queued, reporting: activity.reporting },
+      sessionId: capturedSessionId || sessionId || null,
+      provider: 'codex',
+    }));
+  };
+
   const handleRoundEvent = (method: string, params: AnyRecord): void => {
     const session = currentSession();
     // A stop the user asked for silences the events that follow it, but the
@@ -1125,6 +1152,8 @@ async function queryCodex(
         if (active) {
           active.turnId = turnId;
         }
+        // The engine took the round; it is not waiting any more.
+        announceActivityState();
         return;
       }
 
@@ -1263,10 +1292,11 @@ async function queryCodex(
      * that is still waiting in the engine's queue. A short connection is torn
      * down behind the interrupt.
      */
-    const stopRound = () => {
-      if (isResidentSessionsEnabled()) {
-        void stopCodexResidentRound(residentKey);
-        return;
+    const stopRound = (): Promise<unknown> => {
+      if (residentGeneration !== null) {
+        // The confirmation matters: the engine may already have run the input,
+        // and the user must not see a success before that is known.
+        return stopCodexResidentRound(residentKey);
       }
       const session = currentSession();
       if (session?.threadId && session.turnId) {
@@ -1278,6 +1308,7 @@ async function queryCodex(
       // The connection is torn down on the next tick so the interrupt has a
       // chance to leave the process before its pipes close.
       setTimeout(() => connection?.close(), 250).unref?.();
+      return Promise.resolve('interrupted');
     };
 
     const registerSession = (id: string | null) => {
@@ -1324,9 +1355,13 @@ async function queryCodex(
       registerSession(sessionKey());
     }
 
+    let resident: CodexResidentSession | null = null;
     if (isResidentSessionsEnabled()) {
-      const resident = await acquireCodexResidentSession({
+      try {
+        resident = await acquireCodexResidentSession({
         appSessionId: residentKey,
+        lifetime: toolOutputParam ? 'turn' : 'session',
+        reserveForRound: true,
         userId: normalizedUserId,
         nativeThreadId: providerSessionId,
         workingDirectory,
@@ -1361,20 +1396,30 @@ async function queryCodex(
           approvalSubjects: readSessionApprovalSubjects(residentKey),
         }, method, params),
         onSessionExit: handleProcessExit,
-        onSessionRequest: (method, params) => requestApproval(
-          method,
-          params,
-          publishSessionMessage,
-          readSessionApprovalSubjects(residentKey),
-        ),
-        onRoundEnded: (reason) => {
+        onSessionRequest: async (method, params) => {
+          if (!CODEX_APPROVAL_METHODS.has(method)) return undefined;
+          let ids = sessionApprovalIds.get(residentKey);
+          if (!ids) {
+            ids = new Set<string>();
+            sessionApprovalIds.set(residentKey, ids);
+          }
+          const decision = await requestApproval(method, params, publishSessionMessage,
+            readSessionApprovalSubjects(residentKey), ids);
+          return toCodexApprovalResponse(method, params, decision);
+        },
+        onRoundEnded: (reason, cause) => {
           // The round cannot wait for an event that will never come: the
           // input was withdrawn, or the turn could not be identified.
           if (reason === 'cancelled') {
             terminalStatus = 'interrupted';
           } else {
             terminalStatus = 'unknown';
-            surfaceFailure('Codex could not tell which turn answered this message.');
+            acceptanceUnknown = true;
+            surfaceFailure(cause === 'interrupt'
+              ? 'Codex could not confirm that this turn stopped. Its conversation process and background agents were force-stopped. Check the results before retrying; independent tasks may still be running.'
+              : cause === 'stop'
+              ? 'Codex could not confirm whether the queued message ran. Its conversation process and background agents were force-stopped. Check the results before retrying; independent tasks may still be running.'
+              : 'Codex could not tell which turn answered this message.');
           }
           settle();
         },
@@ -1385,10 +1430,26 @@ async function queryCodex(
           // The agents of a closed process cannot report any more, so their
           // cards are settled.
           settleCodexSessionAgents(residentKey, publishSessionMessage);
+          cancelSessionApprovals(residentKey, 'The conversation process closed before this was answered.');
+          sessionApprovalSubjects.delete(residentKey);
         },
         isBusy: () => codexBackgroundWork.hasSession(residentKey),
       });
+      } catch (error) {
+        // Every resident process is busy. The short connection still works, so
+        // the message goes out instead of failing to send.
+        if (!(error instanceof AppError) || error.code !== 'CODEX_RESIDENT_CAPACITY') {
+          throw error;
+        }
+        console.warn(`[Codex] ${error.message} This round runs on a short connection.`);
+        resident = null;
+      }
+    }
+
+    if (resident) {
       connection = resident.connection;
+      residentGeneration = resident.generation;
+      knownNativeName = resident.nativeName;
       adoptNativeThread(resident.threadId);
     } else {
       connection = await codexAppServerTransport.open({
@@ -1453,19 +1514,16 @@ async function queryCodex(
       throw new Error('Codex app-server opened no thread to run the turn in.');
     }
 
-    const toolOutputParam = options.toolOutput ?? (options.taskContinuation ? {
-      name: 'cloudcli_task_result',
-      output: typeof options.taskContinuation === 'string'
-        ? options.taskContinuation
-        : JSON.stringify(options.taskContinuation),
-    } : null);
 
-    if (isResidentSessionsEnabled() && !toolOutputParam) {
+
+    if (residentGeneration !== null) {
       // The engine's queue is the admission gate: the input waits while the
       // thread is busy and becomes a turn of its own once it is idle.
-      await submitCodexResidentRound({
+      const submitted = await submitCodexResidentRound({
         appSessionId: residentKey,
-        input: toAppServerInput(inputItems as AnyRecord[]),
+        generation: residentGeneration ?? undefined,
+        input: toolOutputParam ? [] : toAppServerInput(inputItems as AnyRecord[]),
+        ...(toolOutputParam ? { toolOutput: toolOutputParam } : {}),
         model: resolvedModel ?? undefined,
         effort: resolvedEffort ?? undefined,
         workingDirectory,
@@ -1475,6 +1533,9 @@ async function queryCodex(
         onEvent: handleRoundEvent,
         onRequest: handleRoundRequest,
       });
+      residentRoundId = submitted.clientUserMessageId;
+      // The engine has the input but has not started its turn yet.
+      announceActivityState();
     } else {
       const startResult = readObjectRecord(await connection.call('turn/start', {
         threadId: capturedSessionId,
@@ -1487,12 +1548,15 @@ async function queryCodex(
     }
 
     await turnSettled;
+    if (toolOutputParam && residentGeneration !== null) {
+      releaseCodexResidentSession(residentKey, { dispose: true, generation: residentGeneration });
+    }
     settleAgentsWhenProcessIsGone();
 
     // Send the terminal completion event — skipped for aborted runs, whose
     // terminal `complete` (aborted: true) was already sent by abort-session.
     const runAborted = currentSession()?.status === 'aborted';
-    if (runAborted) {
+    if (runAborted && !acceptanceUnknown) {
       terminalStatus = 'interrupted';
     }
     if (!runAborted) {
@@ -1515,6 +1579,9 @@ async function queryCodex(
 
   } catch (error) {
     const runError = error instanceof Error ? error : new Error(String(error));
+    if (toolOutputParam && error instanceof AppError && error.code === 'CODEX_SESSION_BUSY') {
+      return { engineTurnId: null, terminalStatus: 'unknown' as const, busy: true };
+    }
     settleAgentsWhenProcessIsGone();
     const wasAborted =
       currentSession()?.status === 'aborted' ||
@@ -1522,7 +1589,7 @@ async function queryCodex(
       runError.message.toLowerCase().includes('aborted');
 
     if (!wasAborted) {
-      terminalStatus = 'failed';
+      if (!acceptanceUnknown) terminalStatus = 'failed';
       console.error('[Codex] Error:', error);
 
       if (!errorSurfaced) {
@@ -1552,7 +1619,7 @@ async function queryCodex(
           error,
         });
       }
-    } else {
+    } else if (!acceptanceUnknown) {
       terminalStatus = 'interrupted';
     }
 
@@ -1563,22 +1630,40 @@ async function queryCodex(
     if (session) {
       session.status = session.status === 'aborted' ? 'aborted' : 'completed';
     }
-    if (isResidentSessionsEnabled()) {
+    if (residentGeneration !== null) {
       // The process stays alive: the next round continues in the same thread.
-      completeCodexResidentRound(residentKey);
-      if (!appSessionId) {
+      if (residentGeneration !== null && residentRoundId) {
+        completeCodexResidentRound(residentKey, { generation: residentGeneration, clientUserMessageId: residentRoundId });
+      }
+      if (toolOutputParam && residentGeneration !== null) {
+        releaseCodexResidentSession(residentKey, { dispose: true, generation: residentGeneration });
+      } else if (!appSessionId && residentGeneration !== null) {
         // A run without an app session has no conversation to stay resident
         // for, so its process is closed with the round.
-        releaseCodexResidentSession(residentKey, { dispose: true });
+        releaseCodexResidentSession(residentKey, { dispose: true, generation: residentGeneration });
+      } else if (residentGeneration !== null) {
+        releaseCodexResidentSession(residentKey, { generation: residentGeneration });
       }
     } else {
       connection?.close();
     }
   }
 
+  const finalStatus = resolveCodexTerminalStatus(terminalStatus, Boolean(terminalFailure));
+  if (finalStatus === 'completed' && !terminalFailure && !toolOutputParam
+    && currentSession()?.status !== 'aborted' && appSessionId && capturedSessionId) {
+    void codexSessionTitleService.enqueue({
+      appSessionId, nativeThreadId: capturedSessionId, generation: residentGeneration ?? 0,
+      workingDirectory, model: resolvedModel ?? catalog.DEFAULT, models: catalog,
+      ...(!providerSessionId ? { initialPrompt: command } : {}),
+    }, knownNativeName).catch(() => {
+      console.warn(`[CodexTitle] ${appSessionId} ${capturedSessionId} enqueue_failed`);
+    });
+  }
+
   return {
     engineTurnId,
-    terminalStatus: resolveCodexTerminalStatus(terminalStatus, Boolean(terminalFailure)),
+    terminalStatus: finalStatus,
   };
 }
 
@@ -1589,7 +1674,7 @@ async function queryCodex(
  * out in the rollout — and the connection is closed behind it so a server
  * that ignores the interrupt cannot keep the run alive.
  */
-function abortCodexSession(sessionId: string) {
+async function abortCodexSession(sessionId: string): Promise<boolean> {
   const session = activeCodexSessions.get(sessionId);
 
   // A session whose round is over has nothing to stop: the entry stays for
@@ -1604,7 +1689,10 @@ function abortCodexSession(sessionId: string) {
     `[Codex] Aborting session ${sessionId} (thread ${session.threadId ?? 'unknown'}, `
     + `turn ${session.turnId ?? 'none'}) — started ${session.startedAt}`,
   );
-  session.stop();
+  // The stop waits for the engine's confirmation. A queued input the engine
+  // already ran cannot be taken back, and the user must not see a success
+  // before that is known; the manager reports the unknown case itself.
+  await session.stop();
 
   return true;
 }
@@ -1647,12 +1735,27 @@ export const codexRuntime = {
     },
   },
   /**
-   * Sessions with collab agents still running, for the running-sessions poll.
-   * The app-server dies with the turn, so these are the agents of turns still
-   * in flight; the turn's end settles and removes the rest.
+   * Sessions with collab agents still running, for the running-sessions poll,
+   * plus resident sessions whose engine reports in a turn of its own after
+   * the last agent ended (listed with no tasks, so the page shows them
+   * working). A short-connection app-server dies with the turn, so its agents
+   * are those of turns still in flight; the turn's end settles the rest.
    */
   listBackgroundWork(): SessionBackgroundWork[] {
-    return codexBackgroundWork.list();
+    const work = codexBackgroundWork.list();
+    const reporting = listCodexReportingOnlySessions()
+      .filter((sessionId) => !codexBackgroundWork.hasSession(sessionId))
+      .map((sessionId) => ({ sessionId, tasks: [] }));
+    return [...work, ...reporting];
+  },
+  /**
+   * What the engine is doing with the conversation's round.
+   *
+   * The engine is the only one that knows whether it picked the queued input
+   * up, so the page asks the engine instead of guessing.
+   */
+  getSessionActivity(sessionId: string): { queued: boolean; reporting: boolean } | null {
+    return readCodexResidentSessionActivity(sessionId);
   },
   /**
    * Whether the conversation still has work that must not be reclaimed.

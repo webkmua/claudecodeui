@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
 import type { ServerEvent } from '@/shared/context/WebSocketContext';
-import { showCompletionTitleIndicator } from '@/modules/chat/utils/pageTitleNotification';
+import { showCompletionTitleIndicator } from '@/shared/utils';
 import { playChatCompletionSound, playNotificationSound } from '@/modules/chat/utils/notificationSound';
 import type { MarkSessionIdle, MarkSessionProcessing, SessionActivityMap, PendingPermissionRequest, ProjectSession, LLMProvider } from '@/shared/types';
 import type { ServerEventDirective } from '@/modules/chat/utils/sessionTimelineStore';
@@ -312,7 +312,15 @@ export function useChatRealtimeHandlers({
         }
 
         case 'status': {
-          if (directive.text === 'token_budget' && directive.tokenBudget) {
+          if (directive.text === 'activity_state' && directive.sessionId && directive.activityState) {
+            // The engine says what it is doing with the round, so the pill can
+            // tell "waiting for the engine" from "the engine is working on it"
+            // without waiting for the next poll.
+            onSessionProcessing?.(directive.sessionId, {
+              queued: directive.activityState.queued === true,
+              reporting: directive.activityState.reporting === true,
+            });
+          } else if (directive.text === 'token_budget' && directive.tokenBudget) {
             setTokenBudget(directive.tokenBudget as Record<string, unknown>);
           } else if (directive.text === 'background_tasks' && directive.sessionId) {
             // Agents launched and settled mid-turn (Codex, ZCode) are the

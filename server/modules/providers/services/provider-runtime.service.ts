@@ -4,6 +4,7 @@ import { sessionsService } from '@/modules/providers/services/sessions.service.j
 import type { IProvider } from '@/shared/interfaces.js';
 import type {
   ActiveBackgroundTask,
+  TaskBridgeEngineCall,
   AnyRecord,
   LLMProvider,
   NormalizedMessage,
@@ -17,6 +18,7 @@ type ProviderRuntimeServiceDependencies = {
   listProviders(): IProvider[];
   resolveProvider(provider: string): IProvider;
   resolveProviderSessionId(sessionId: string | null | undefined): string | null;
+  resolveTranscriptPath(sessionId: string): string | null;
   resolveResumeModel(
     provider: LLMProvider,
     sessionId: string | undefined,
@@ -29,6 +31,7 @@ const defaultDependencies: ProviderRuntimeServiceDependencies = {
   listProviders: () => providerRegistry.listProviders(),
   resolveProvider: (provider) => providerRegistry.resolveProvider(provider),
   resolveProviderSessionId: (sessionId) => sessionsService.resolveProviderSessionId(sessionId),
+  resolveTranscriptPath: (sessionId) => sessionsService.resolveTranscriptPath(sessionId),
   resolveResumeModel: (provider, sessionId, requestedModel) =>
     providerModelsService.resolveResumeModel(provider, sessionId, requestedModel),
   getProviderModels: (provider) => providerModelsService.getProviderModels(provider),
@@ -74,20 +77,13 @@ export function createProviderRuntimeService(
    *
    * The composition root installs it with the task bridge's registry.
    */
-  let engineToolCallRegistrar: ((call: {
-    appSessionId: string;
-    threadId: string;
-    turnId: string | null;
-    callId: string;
-    server: string;
-    tool: string;
-    runToken: string;
-  }) => void) | undefined;
+  let engineToolCallRegistrar: ((call: TaskBridgeEngineCall) => void) | undefined;
 
   const createRuntimeContext = (
     provider: IProvider,
   ): ProviderRuntimeContext => ({
     resolveProviderSessionId: dependencies.resolveProviderSessionId,
+    resolveTranscriptPath: dependencies.resolveTranscriptPath,
     resolveResumeModel: (sessionId, requestedModel) =>
       dependencies.resolveResumeModel(provider.id, sessionId, requestedModel),
     getProviderModels: async () => dependencies.getProviderModels(provider.id),
@@ -162,15 +158,8 @@ export function createProviderRuntimeService(
       bridgeCredentialRevoker = revoker;
     },
 
-    setEngineToolCallRegistrar(registrar: (call: {
-      appSessionId: string;
-      threadId: string;
-      turnId: string | null;
-      callId: string;
-      server: string;
-      tool: string;
-      runToken: string;
-    }) => void): void {
+    /** Used by server composition to connect observed native calls to task authorization. */
+    setEngineToolCallRegistrar(registrar: (call: TaskBridgeEngineCall) => void): void {
       engineToolCallRegistrar = registrar;
     },
 
@@ -184,6 +173,19 @@ export function createProviderRuntimeService(
 
     getRunner(provider: LLMProvider): ProviderRunFunction {
       return (command, options, writer) => run(provider, command, options, writer);
+    },
+
+    /**
+     * What the engines report about the session's round.
+     */
+    getSessionActivity(sessionId: string): { queued: boolean; reporting: boolean } | null {
+      for (const provider of dependencies.listProviders()) {
+        const activity = provider.runtime.getSessionActivity?.(sessionId);
+        if (activity) {
+          return activity;
+        }
+      }
+      return null;
     },
 
     /**
