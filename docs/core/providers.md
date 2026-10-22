@@ -1,6 +1,6 @@
 # Provider 架构与接入指南
 
-> 基准：2.10.0 / 2026-10-21
+> 基准：2.11.0 / 2026-10-22
 > **核心文档**：改动 `server/modules/providers/**` 或 `server/shared/{types,interfaces}.ts` 时**必须同步更新本文**。
 > 普通 bug 修复不动架构的不需要更新（提交时走 `--no-verify`，见 `AGENTS.md`）。
 > 引用一律给"文件路径 + 符号名"，不用行号。
@@ -32,6 +32,8 @@
 队列的读有四种结果：本轮已消耗（武装）、仍在队列（引擎自己起的回合）、读不出来（归属无法判定，本轮按状态不明结束，不无限等待）、本轮已经结束（什么都不做）。读不出来和本轮已结束必须分开，否则用户刚按停止就会收到一条"无法判断是哪个回合回答了这条消息"的错误。
 
 **回收**：归档、空闲回收和容量淘汰使用同一个活动判断，覆盖初始化、运行时准备窗口预留、前台回合、待判定回合、后台代理、汇报、辅助线程借用与未回答的引擎请求。全部会话都在工作时明确报容量不足，不杀活跃会话来接另一条消息。空闲期限与容量默认值以管理模块为准，分别由 `CLOUDCLI_CODEX_RESIDENT_IDLE_MS` 和 `CLOUDCLI_CODEX_RESIDENT_MAX` 覆盖。进程关闭时它带的桥接凭证立即作废（凭证由管理模块持有，复用进程不会把作废的责任换给别人），它跑的 agent 也随进程一起结算为停止。驻留记录绑定可信用户与原生线程：换了用户或编辑重发换了线程，旧进程不能复用。
+
+**一轮结束后的停止**：用户这一轮已结束、进程里还有 agent 或引擎自发的汇报回合时，`abort` 按归档的方式关闭会话的驻留进程和它名下的辅助进程，agent 随进程结算为停止，下一条消息在新进程里续接线程。上一次停止还在等引擎确认中断时，再按停止返回 false，不把优雅中断升级成关进程。协议里没有单停一个 agent 的请求；agent 卡在引擎的网络重试里、自己那一轮一直不结束时，停止按钮是唯一的出口。既没有 agent 也没有汇报回合时，`abort` 返回 false。
 
 引擎自发回合的审批属于会话而不是某一轮：下一轮结束不能把它撤掉，进程关闭才撤。会话通道和回合通道都把用户决定转换成原生审批响应。请求必须先等对应原生回合的待判定事件处理完成，才能选择审批通道；用户输入仍在排队时，引擎汇报的审批仍归会话。撤销排队输入只在引擎确认删除时成功；无法确认时强制关闭所属进程，运行结果保持状态不明，提示用户核对执行结果和仍可能存活的独立任务。已开始回合的中断被拒绝或终态等待超过管理模块期限时同样处理；同一停止共享操作，真实终态撤掉该回合的强退计时器。归档或删除期间的准入检查在运行时入口，不只挡驻留路径的提交。驻留默认开启，`CLOUDCLI_CODEX_RESIDENT=0` 退回短连接：每轮自己开连接、自己 `turn/start`、结束即关。
 
@@ -138,7 +140,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | Claude | `Agent` 工具；老记录里叫 `Task` | 历史与实时共用 `canonicalClaudeSubagentToolName`，把老名字 `Task` 翻成 `Agent`；`claude-background-work.ts` 认两个名字；历史按调用结果里的 `agentId` 挂 `subagent` 和子时间线 | 同步 agent 用调用结果；后台 agent 用 SDK 的任务通知；进程没了、或进程空闲常驻时读作 `stopped` |
 | ZCode | `Agent` 工具，名字原样透传 | 引擎在父会话上发 `subagent_spawned` / `subagent_stopped`，翻成 `task_status`；历史读 agent 旁车 `cli/agents/<父会话>/<agentId>/metadata.json`，再按旁车里的 `childSessionId` 读子会话的消息行（与父会话同一个归一化器）作子时间线，条数上限 `MAX_TRANSMITTED_SUBAGENT_ACTIVITIES`，`activityCount` 报总数 | `subagent_stopped`（`completed` / `failed` / `stopped`）；引擎进程死掉（`SESSION_LOST_METHOD`）时对登记簿里每个 agent 补发 `stopped`；旁车里仍写 `running` 的，只有登记簿里还有该 agent 才算运行中，否则读作 `stopped` |
-| Codex | 只有 `SubAgentActivity` 记录，没有任何派 agent 的工具调用条目 | `buildCodexSubagentAgentRow` 从 `started` 记录合成 `Agent` 行；同一 agent 的开始与结束条目 id 不同，靠 `agent_thread_id` 配对 | `completed` / `interrupted` 活动；app-server 随每一轮结束被杀，轮次结束时仍登记的 agent 一律结算为 `stopped`；历史与实时同口径：`completed` 活动在案就读作 `completed`（它的 FINAL_ANSWER 可能缺失或是读不出的加密消息），否则 `interrupted` 活动和 `turn_aborted` 都读作 `stopped`，没有结束记录的 agent 只有登记簿里还有它才算 `running`，否则读作 `stopped` |
+| Codex | 只有 `SubAgentActivity` 记录，没有任何派 agent 的工具调用条目 | `buildCodexSubagentAgentRow` 从 `started` 记录合成 `Agent` 行；同一 agent 的开始与结束条目 id 不同，靠 `agent_thread_id` 配对 | agent 自己线程的 `turn/completed` 按回合状态结算（`completed` / `failed` 带错误原因 / `interrupted` 读作 `stopped`），父线程的 `completed` / `interrupted` 活动也结算；被父线程再次叫醒的 agent 由它线程的 `turn/started` 回到原卡片继续 `running`；短连接的 app-server 随每一轮结束被杀，轮次结束时仍登记的 agent 一律结算为 `stopped`；历史与实时同口径：`completed` 活动在案就读作 `completed`（它的 FINAL_ANSWER 可能缺失或是读不出的加密消息），否则 `interrupted` 活动和 `turn_aborted` 都读作 `stopped`，父线程没有结束记录的 agent 只有登记簿里还有它才算 `running`，否则按它自己 rollout 末轮的结局读（`task_complete` 带 `error` 为 `failed`、不带为 `completed`，`turn_aborted` 为 `stopped`），末轮没有结局读作 `stopped` |
 | OpenCode | `subagent` 工具，输入 `{agent, description, prompt, sessionID?}`，结果 metadata 带子会话 id | 实时翻译器和历史读取共用 `opencode-subagent.ts`：名字翻成 `Agent`，`agent` 翻成 `subagent_type`；历史有子会话 id 时读子会话的 `session_message` 作子时间线 | 前台调用看工具自身的状态（`completed` / `error`）；运行结束时翻译器对没等到结果的调用补 `stopped`；历史里停在 `pending` / `running` 的调用，只有所属会话还没进入 idle 才算运行中，否则读作 `stopped`。`background: true` 的调用立即以 `completed` 返回、metadata 仍是 `running`，这只表示已启动：结果看引擎在 agent 结束时写进父会话的合成通知（`completed` / `cancelled`→`stopped` / 其余→`failed`），还没有通知时运行时登记簿里有它就是 `running`，否则是 `stopped`（见下文 OpenCode 的后台工作） |
 | Antigravity | `invoke_subagent`，一次调用派 N 个 agent | 一次调用拆成 N 条 `Agent` 行，`toolId` 为 `<调用 id>:<conversation_id>`，每个 agent 一张卡，卡头的描述取提示词首行（不是角色名，否则会显示 "角色 / 角色"）；实时取 `step_type: "subagent"` 的 DONE 步骤，历史取规划条目里的角色与提示词、再从下一步的回执文本取 `conversationId`；子时间线读 agent 自己的 transcript | agy 在所有 agent 汇报完之后才给出 `result`。实时在 `result` 到达时、历史在读取时，用同一个判定 `judgeAntigravityAgent`：父会话里有该 agent 的汇报（`sender=<conversationId>`）即 `completed`；否则读 agent 自己的 transcript 的最后一条有效行：`ERROR_MESSAGE` 为 `failed`，不再请求工具的规划回复为 `completed`，其余（工具未返回、没有 transcript）为 `stopped`。进程退出或中止时一律 `stopped`。回执步骤还没写入时，历史采用运行时登记簿里同一次调用的 conversationId 和 `running` 状态，刷新前后是同一批卡 |
 | Cursor | 本机没有 Cursor 转录，不能确认有派 agent 的工具 | 未接入；若转录里出现派 agent 的工具，按上面的方式翻成 `Agent` 行 | — |
@@ -161,7 +163,9 @@ Codex、ZCode、Antigravity、OpenCode 共用 `shared/background-work/background
 
 - **OpenCode**：引擎为每个子 agent 新建一个子会话，它的事件和 `permission.asked` 都带子会话 id。`opencode-run-registry.ts` 从 `session.created.parentID` 和父会话上 `session.tool.progress` 的 `metadata.sessionID` 建立"子会话 → 根会话"的归属表。每个子会话记着派它的调用（`spawnCallId`，同一子会话被后一次调用再派时跟随最新的调用）；它的行属于哪张卡，是在分发时顺着祖先链走到根会话下最上面那个子会话、取它的派发调用得出的，孙会话因此总是落到用户看得见的那张外层卡，即使孙会话比它的祖先更早被登记。卡片还不明时的帧先存着（每个子会话上限 500 条，超出时记一条警告日志）。批准和提问卡片按根会话显示，回复仍发给子会话（`opencode-interaction-bridge.ts` 通过 `resolveChild` 找到根会话），卡片的 `context.subagent` 带上这张 `Agent` 卡（`toolUseId` 和派发调用的 `description`）。子会话的事件由它自己的翻译器翻成行，带上 `parentToolUseId`（派它的那次 `Agent` 调用）发给根会话当前的 writer（运行在跑时是运行的 writer，否则是会话通道）；派发调用还没被报告出来之前的行先存着，调用报告出来后补发；流式增量不发，只发定稿行。子会话的结束事件不结算父会话这一轮。根运行结束时，前台子会话里没等到结果的嵌套 agent 调用补发 `stopped`，后台 agent 的子会话还在干活，不补；归属表随会话一起遗忘。
 - **Claude**：子 agent 与主线程共用同一个 `canUseTool` 回调（SDK 的回调参数带 `toolUseID` 和 `agentID`），请求自然到达页面，请求 id 就是回复键。回调只给出发起调用的 id，不给卡片：`claude-subagent-origin.ts` 的追踪器在流上记下每个工具调用的 `parent_tool_use_id`（嵌套 agent 解析到最外层那张卡）和各 `Agent` 调用的任务行，请求据此带上 `context.subagent`；等待中的卡片（重连回放用）保存同一份上下文。请求和流是两条路，实测流领先请求约 1ms，但顺序没有保证，所以请求先到时 `whenObserved` 最多等 1.5 秒让流把这次调用交代出来，再取来源。一轮的进程结束时，`cancelRunApprovals` 撤回这一轮还没回答的卡片（交互类工具如 `AskUserQuestion` 不设超时，子 agent 的请求也活得比派它的那一轮久），不依赖 SDK 是否在进程退出时中止信号。直播里子 agent 的行带 `parent_tool_use_id`，进入下面的"过程折进卡片"机制。
-- **Codex**：子 agent 跑在同一个 app-server 连接的另一条线程上。审批是连接级的服务端请求（`onRequest`），不看线程 id，所以子 agent 的批准能到页面。子线程的 `item/completed` 通知此前被丢弃，现在按线程 id 在登记簿里找到那张卡，用与历史相同的行渲染器（跳过 agent 自己的提示词和生命周期条目）发出，带 `parentToolUseId`；不是本次运行派出的线程忽略。审批请求的 `threadId` 是子线程时，卡片的 `context.subagent` 取自同一条登记项。真实引擎从不把派发发成协作工具调用条目（`collab_spawn` 形状），这种形状不转发。
+- **Codex**：子 agent 跑在同一个 app-server 连接的另一条线程上。审批是连接级的服务端请求（`onRequest`），不看线程 id，所以子 agent 的批准能到页面。子线程的 `item/completed` 通知此前被丢弃，现在按线程 id 在登记簿里找到那张卡，用与历史相同的行渲染器（跳过 agent 自己的提示词和生命周期条目）发出，带 `parentToolUseId`；不是本次运行派出的线程忽略。
+
+  agent 是否在跑，以它自己线程的回合为准，不以父线程的活动记录为准。引擎只在父线程等待 agent 时写 `subAgentActivity completed`；父回合先失败（例如撞上额度上限）就没人写，agent 会一直显示在跑。实测本机全部子 agent 记录：同一 agent 一轮结束后又被父线程叫醒跑下一轮很常见，额度失败后再被叫醒也出现过，所以一轮结束只表示 agent 空闲，不表示它没了。运行时因此在子线程 `turn/completed` 时注销登记、按回合状态结算卡片，并记住这张卡；同一线程再出 `turn/started` 时按原卡片重新登记。父线程的 `started` 活动常常晚于 agent 自己这一轮的结束：驻留会话要等确认父线程事件属于哪一轮才处理它们，子线程事件则立即处理。所以运行时记住每个 agent 末轮的结局，下一轮开始时清掉；`started` 活动登记时若末轮已有结局，立即结算。父线程在 agent 新一轮开始前就记下叫醒时，卡片先结算一次，到 agent 那一轮开始再转回 `running`。停止或关进程结算掉的 agent 同样记住卡片，新进程叫醒它时回到原卡片。审批请求的 `threadId` 是子线程时，卡片的 `context.subagent` 取自同一条登记项。真实引擎从不把派发发成协作工具调用条目（`collab_spawn` 形状），这种形状不转发。
 - **ZCode**：引擎的 `createSubagentInteractionBroker` 会把子 agent 的权限请求改写到父会话 id，并带上 `origin`（`kind: "subagent"`、`agentId`、`agentType`、`description`、`parentToolCallId`、`childSessionId`），所以只要父会话有一轮在跑，请求就按父会话找到对应运行；卡片的 `context.subagent` 取自 `origin.parentToolCallId` 和 `origin.description`。父会话这一轮结束后后台 agent 仍可能请求批准，此时没有运行可找，请求曾被当场拒绝。现在 `ZCodeRunLifecycle.adoptIdleTarget` 让窄监听器把自己的 writer 登记为该会话的临时目标，批准和提问卡片发给它，回复和撤回卡片走同一条路。agent 停止时，它名下尚未回答的卡片会被撤回（先于临时目标的释放），引擎那边挂着的请求按拒绝应答；引擎死亡时撤回该会话所有子 agent 的卡片。直播过程不需要订阅子会话：真实引擎把 agent 的工具调用镜像在父会话的流里（`tool.updated`，载荷带 `source: "subagent"`、`parentToolCallId`、`agentId`、`childSessionId`、`childToolCallId`），归一化器给这些 `tool_use` 行加上 `parentToolUseId`；agent 的文字不在父会话流里，刷新后由历史（子会话）补上。
 - **Antigravity**：`agy` 以非交互方式运行，权限只靠启动参数（`--mode`、`--dangerously-skip-permissions`），运行时没有批准卡片，子 agent 也没有请求可送。子 agent 的过程不在 `agy` 的流里，只写在它自己的 transcript（brain 目录，按 conversationId）；agent 登记期间，`antigravity-agent-tail.ts` 用 `fs.watch` 加定时轮询重读该 transcript（与历史同一个读取器，行和 id 一致），把新增或变化的步骤（工具调用、文字、思考）带上 `parentToolUseId` 发出。轮次结果到达、进程退出或出错时，先等每个 agent 最后一次读取发完，再发结算帧和 `complete`，所以最后的步骤不会落在结算之后；`conversationId` 不合法的 agent 只警告一次、不再轮询。实时流里 `invoke_subagent` 的原始 `tool_use` / `tool_result` 不再发出（agent 卡片已代表这次调用），与历史一致。
 
@@ -289,6 +293,9 @@ opencode 的自动命名由引擎自己做，CloudCLI 只负责不挡路。引�
 
 `provider-capabilities.catalog.ts` 放**推导不出来的静态事实**（权限模式、默认模型、附件/中止/effort）；
 `provider-capabilities.service.ts` 从**已注册切面推导**其余能力——切面在即能力在，加减切面自动翻转，不必改表。
+推理档位清单（`effortLevels`）也在静态目录里：它是运行时可传的档位全集、 weakest first，
+自定义模型库只能从这份清单里挑选声明（`supportsEffort` 为假时必为空）；
+目录里某个精选模型声明了清单之外的档位会被 `provider-capabilities.service.test.ts` 拦下。
 `supportsQuota` 就是这样推导的：`auth.getQuota` 存在即为真，而 `provider-token-usage.service.ts`
 本来就按这个方法分发配额请求；`supportsQuotaReset`（能否花掉重置卡）同理，看 `auth.consumeQuotaReset`。
 
@@ -423,11 +430,20 @@ id 必须字节相同。** 这条有两道闸门守着：
 | 引擎 | 行身份 | 依据 |
 | --- | --- | --- |
 | claude | 落盘 `uuid` | 实时 SDK 消息与落盘行的 `uuid` 同值，两路归一化出的 id 逐行相同 |
-| codex | ThreadItem 的 `id`（`msg_…`/`rs_…`/`exec-<uuid>`/`call_…`），一项多行时后缀 `_<n>` / `_result` | 两路读的是同一个 ThreadItem：app-server 实时推 `item/started`+`item/completed`，rollout 把同一项写进 `event_msg`→`item_completed`，id 逐字相同 |
+| codex | ThreadItem 的 `id`（`msg_…`/`rs_…`/`exec-<uuid>`/`call_…`），一项多行时后缀 `_<n>` / `_result`；引擎记了原因的失败回合，错误行取 `turn_id` 加后缀 `_error` | 两路读的是同一个 ThreadItem：app-server 实时推 `item/started`+`item/completed`，rollout 把同一项写进 `event_msg`→`item_completed`，id 逐字相同。失败回合的原因两路各报一次（实时 `error` 通知与 `turn/completed`，落盘 `task_complete`），报的是同一个回合，回合 id 同值，所以错误行两路同名 |
 | antigravity | `msg_<sessionId>_<toolId>`（工具行）、`msg_<sessionId>_<step_index>`（正文行） | 工具调用在两路的 step 号相差一步，由 `buildAntigravityToolId` 归一后再派生行 id |
 | zcode | `(message_id, part_id)`；推理段取开启该段事件的 `${id}_reasoning` | 引擎事件自带 id，段内后续 delta 沿用开段 id。实时流不发正文行 id（只有 delta），故 assistant 正文改由 `providerRowKey: zcode-message:<message_id>` 对账，两路同源 |
 | cursor | 未盘点 | 本 fork 不投入，只保证可编译、测试通过 |
 | opencode | `${消息id}_text_${n}` / `${消息id}_reasoning_${n}`（每类型在消息内从 0 计数）、工具调用 id | SSE 事件的 `ordinal` 与落盘 `content` 块按同一规则编号（v2.0.31 的计数器每条消息每类型归零，从引擎二进制源码核实），历史读侧按同规则重编号；`session.text.ended` 带全文，翻译器据此发正式正文行，流式占位行被就地顶替。工具行 id 两路仍不同，靠原生 call id（`toolId`）配对 |
+
+**失败回合的原因只写在关回合的那条记录上。** codex 为一次失败的回合写
+`task_complete`（带 `error`），不为它写任何 item——只读 item 流的读取器会留下
+"一句提问、没有回答、也没有原因"。实时流报的是同一件事（`error` 通知加
+`turn/completed` 的 `failed`），两路的回合 id 同值，于是错误行的 id 取 `turn_id`
+加后缀 `_error`（规则在 `codex-turn-error.ts`）：刷新时持久化的那一份顶替实时的那一份，
+而不是变成两条。引擎没记原因的回合没有这一行：被中断的回合落盘是 `turn_aborted`
+（历史侧读成一行 "Turn interrupted" 提示），实时侧那行是本次运行自己的，不冒充回合身份——
+两路之间没有可对认的行，就不假装有。
 
 **引擎同时提供「原始记录」和「组装好的记录」时，两路都读组装的那一份。** codex 的 rollout 里
 既有 Responses API 的原始条目（`response_item`：`custom_tool_call` 及其输出、`function_call`、

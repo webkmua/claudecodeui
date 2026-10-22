@@ -32,10 +32,10 @@ import {
   canonicalClaudeSubagentToolName,
   createNormalizedMessage,
   generateMessageId,
+  isClaudeNonTurnMessageRow,
   isPlaceholderProviderModel,
   normalizeProjectPath,
   readObjectRecord,
-  readUsageNumber,
   removePathIfExists,
   sanitizeLeafDirectoryName,
   sliceTailPage,
@@ -45,7 +45,10 @@ import {
 } from '@/shared/utils.js';
 import { sessionsDb } from '@/modules/database/index.js';
 import { getClaudeSDKSessionStartTime } from '@/modules/providers/list/claude/claude-runtime.provider.js';
-import { summarizeClaudeTokenUsage } from '@/modules/providers/services/claude-usage.js';
+import {
+  getReportedClaudeContextWindow,
+  summarizeClaudeTokenUsage,
+} from '@/modules/providers/services/claude-usage.js';
 import { liftMemoryCitations } from '@/modules/providers/shared/memory-citations.js';
 import { isClaudeConversationRecord } from '@/shared/index.js';
 
@@ -125,7 +128,7 @@ async function readClaudeSubagentTranscript(filePath: string): Promise<ClaudeSub
 
       try {
         const entry = parseProviderJson(line) as AnyRecord;
-        if (!isClaudeConversationRecord(entry)) continue;
+        if (!isClaudeConversationRecord(entry) || isClaudeNonTurnMessageRow(entry)) continue;
         const timestamp = typeof entry.timestamp === 'string' ? entry.timestamp : undefined;
         if (timestamp && !transcript.startedAt) {
           transcript.startedAt = timestamp;
@@ -468,6 +471,7 @@ async function readTranscriptRows(jsonlPath: string, providerSessionId: string):
   const rows: AnyRecord[] = [];
   for await (const entry of readJsonlRecords(jsonlPath)) {
     if (entry.sessionId !== providerSessionId) continue;
+    if (isClaudeNonTurnMessageRow(entry)) continue;
     // Preserve graph/control records for their own consumers. A nested message
     // in any other record is a diagnostic payload, not another conversation.
     if (isClaudeConversationRecord(entry)
@@ -942,6 +946,30 @@ const INTERNAL_CONTENT_PREFIXES = [
   'Base directory for this skill:',
 ] as const;
 
+/**
+ * Claude Code 2.1.282+ writes pasted text into the transcript already wrapped as
+ * `<pasted_content id="ID">\nBODY\n</pasted_content id="ID">`. The closing tag
+ * carries the id too, so a generic closing-tag stripper misses it.
+ */
+const PASTED_CONTENT =
+  /<pasted_content id="([^"]*)">\n?([\s\S]*?)\n?<\/pasted_content(?: id="\1")?>/g;
+
+/**
+ * Replaces each well-formed `<pasted_content>` wrapper with its body so a user
+ * message shows the text that was pasted. Unclosed or mismatched-id wrappers are
+ * left untouched, and a message with no wrapper is returned unchanged.
+ */
+function unwrapPastedContent(text: string): string {
+  let unwrapped = false;
+  const result = text.replace(PASTED_CONTENT, (_match, _id: string, body: string) => {
+    unwrapped = true;
+    return body;
+  });
+
+  if (!unwrapped) return text;
+  return result.replace(/^[\r\n]+|[\r\n]+$/g, '');
+}
+
 function isInternalContent(content: string): boolean {
   return INTERNAL_CONTENT_PREFIXES.some((prefix) => content.startsWith(prefix));
 }
@@ -1042,54 +1070,24 @@ function readTaskUsage(value: unknown): TaskUsage | undefined {
 }
 
 /**
- * Reads the latest assistant-message usage snapshot from a Claude JSONL.
+ * Reads the latest assistant-message usage snapshot from a Claude JSONL file.
  *
- * Claude appends cumulative per-assistant usage over time, so the scan walks
- * from the end and stops at the first readable assistant entry. Cache reads
- * and writes count toward the input total, matching how the CLI bills them.
+ * Only assistant rows that carry usage are kept, and the snapshot is picked by
+ * `summarizeClaudeTokenUsage` — the same rule the history reader applies — so
+ * a subagent turn or a `<synthetic>` all-zero row never becomes the newest turn.
  */
 async function readClaudeTokenUsage(
   filename: string,
   configuredContextWindow: string | undefined,
+  reportedContextWindow?: number,
 ): Promise<ProviderTokenUsageResult> {
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cacheReadTokens = 0;
-  let cacheCreationTokens = 0;
-
+  const usageRows: AnyRecord[] = [];
   for await (const entry of readJsonlRecords(filename)) {
-      const usage = entry.type === 'assistant' ? entry.message?.usage : null;
-      if (!usage) {
-        continue;
-      }
-
-      const directInputTokens = readUsageNumber(usage.input_tokens ?? usage.inputTokens);
-      cacheReadTokens = readUsageNumber(
-        usage.cache_read_input_tokens ?? usage.cacheReadInputTokens ?? usage.cacheReadTokens,
-      );
-      cacheCreationTokens = readUsageNumber(
-        usage.cache_creation_input_tokens
-          ?? usage.cacheCreationInputTokens
-          ?? usage.cacheCreationTokens,
-      );
-      inputTokens = directInputTokens + cacheReadTokens + cacheCreationTokens;
-      outputTokens = readUsageNumber(usage.output_tokens ?? usage.outputTokens);
+    if (entry.type === 'assistant' && entry.message?.usage) {
+      usageRows.push({ type: entry.type, isSidechain: entry.isSidechain, message: { usage: entry.message.usage } });
+    }
   }
-
-  const parsedContextWindow = Number.parseInt(configuredContextWindow ?? '', 10);
-  const contextWindow = Number.isFinite(parsedContextWindow) ? parsedContextWindow : 160_000;
-  const cacheTokens = cacheReadTokens + cacheCreationTokens;
-
-  return {
-    used: inputTokens + outputTokens,
-    total: contextWindow,
-    inputTokens,
-    outputTokens,
-    cacheReadTokens,
-    cacheCreationTokens,
-    cacheTokens,
-    breakdown: { input: inputTokens, output: outputTokens },
-  };
+  return summarizeClaudeTokenUsage(usageRows, configuredContextWindow, reportedContextWindow);
 }
 
 /**
@@ -1286,6 +1284,12 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       return [];
     }
     const messages = this.normalizeMessageRows(rawMessage, sessionId);
+    // Show the text that was pasted, not the wrapper tags Claude Code stores it in.
+    for (const message of messages) {
+      if (message.role === 'user' && message.kind === 'text' && typeof message.content === 'string') {
+        message.content = unwrapPastedContent(message.content);
+      }
+    }
     // A synthesized id is useless as an anchor — it changes on every read — so
     // a row without its own uuid produces messages with no anchor at all.
     const raw = readObjectRecord(compactProviderPayload(rawMessage));
@@ -1934,7 +1938,11 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       // Carried on every page, like the Codex and OpenCode readers do, so the
       // composer's counter tracks the conversation instead of being frozen at
       // whatever it was when the session was opened.
-      tokenUsage: summarizeClaudeTokenUsage(rawMessages),
+      tokenUsage: summarizeClaudeTokenUsage(
+        rawMessages,
+        undefined,
+        getReportedClaudeContextWindow(providerSessionId),
+      ),
     };
   }
 
@@ -1980,7 +1988,11 @@ export class ClaudeSessionsProvider implements IProviderSessions {
       });
     }
 
-    return readClaudeTokenUsage(sessionFilePath, process.env.CONTEXT_WINDOW);
+    return readClaudeTokenUsage(
+      sessionFilePath,
+      process.env.CONTEXT_WINDOW,
+      getReportedClaudeContextWindow(input.nativeSessionId),
+    );
   }
 
   /**
