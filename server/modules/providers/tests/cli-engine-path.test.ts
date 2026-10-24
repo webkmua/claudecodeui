@@ -108,6 +108,24 @@ const withEnv = async (value: string | undefined, runTest: () => Promise<void>):
 
 const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
 
+test('env override set to disabled prevents resolution completely without which or platform probe', async () => {
+  for (const disabledVal of ['disabled', 'none', 'false', 'off']) {
+    await withEnv(disabledVal, async () => {
+      const { resolver, calls, restore } = createTestResolver({
+        responses: { which: { stdout: '/usr/local/bin/test-cli\n', status: 0 } },
+        platform: 'darwin',
+      });
+
+      try {
+        assert.equal(resolver.tryResolveEnginePath(), null);
+        assert.deepEqual(calls, []); // No which or platform calls made!
+      } finally {
+        restore();
+      }
+    });
+  }
+});
+
 test('resolution prefers env override, then PATH, then platform candidates', async () => {
   await withEnv(undefined, async () => {
     const { resolver, calls, restore } = createTestResolver({

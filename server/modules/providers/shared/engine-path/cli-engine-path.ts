@@ -115,6 +115,9 @@ export function createCliEnginePathResolver(
   function resolveFromEnv(): string | null {
     for (const envVar of config.envVars) {
       const envPath = process.env[envVar]?.trim();
+      if (envPath && (envPath === 'disabled' || envPath === 'none' || envPath === 'false' || envPath === 'off')) {
+        return 'disabled';
+      }
       if (envPath && config.isValidPath(envPath)) {
         return path.resolve(envPath);
       }
@@ -196,13 +199,19 @@ export function createCliEnginePathResolver(
 
   function tryResolveEnginePath(): string | null {
     if (cachedEnginePath !== null) {
-      return cachedEnginePath;
+      return cachedEnginePath === 'disabled' ? null : cachedEnginePath;
     }
     if (negativeResolvedAt !== null && now() - negativeResolvedAt < DEFAULT_NEGATIVE_PROBE_TTL_MS) {
       return null;
     }
 
-    const resolved = resolveFromEnv() ?? resolveFromWhich() ?? resolveFromPlatformPaths();
+    const fromEnv = resolveFromEnv();
+    if (fromEnv === 'disabled') {
+      cachedEnginePath = 'disabled';
+      return null;
+    }
+
+    const resolved = fromEnv ?? resolveFromWhich() ?? resolveFromPlatformPaths();
     if (resolved) {
       cachedEnginePath = resolved;
       scheduleVersionProbe(resolved);
