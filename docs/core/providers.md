@@ -1,6 +1,6 @@
 # Provider 架构与接入指南
 
-> 基准：2.11.0 / 2026-10-22
+> 基准：2.12.0 / 2026-10-23
 > **核心文档**：改动 `server/modules/providers/**` 或 `server/shared/{types,interfaces}.ts` 时**必须同步更新本文**。
 > 普通 bug 修复不动架构的不需要更新（提交时走 `--no-verify`，见 `AGENTS.md`）。
 > 引用一律给"文件路径 + 符号名"，不用行号。
@@ -17,7 +17,7 @@
 
 `codex-session-manager.ts` 按应用会话 id 持有驻留的 `codex app-server` 进程：同一会话的下一轮沿用同一个进程和同一个原生线程，不再每轮重启进程、重新加载历史。进程代次在宿主生命周期内单调递增，删除记录后重开也不会复用旧代次。旧进程的迟到回调只能清理自己那一条。初始化失败走统一销毁入口；初始化中关闭会话后，迟到的连接或线程应答不能重新登记进程。
 
-**提交路径是引擎的线程队列，不是 `turn/start`。** 活跃回合上的第二次 `turn/start` 不会新建回合，而是把输入并进正在跑的那一回合——引擎自发汇报时，用户消息就会被汇报回合吞掉。线程队列没有这个问题：`thread/queue/add` 写入输入，引擎忙时拒绝启动（`thread already has an active or pending turn`），闲时把队列排空，每条输入单独起一个回合。本轮设置先经 `thread/settings/update` 写进线程（模型、推理强度、工作目录、沙箱、审批策略），再写队列。这几个队列方法是 experimental 方法，连接必须声明 `experimentalApi` 能力。
+**提交路径是引擎的线程队列，不是 `turn/start`。** 活跃回合上的第二次 `turn/start` 不会新建回合，而是把输入并进正在跑的那一回合——引擎自发汇报时，用户消息就会被汇报回合吞掉。线程队列没有这个问题：`thread/queue/add` 写入输入，引擎忙时拒绝启动（`thread already has an active or pending turn`），闲时把队列排空，每条输入单独起一个回合。引擎并不总是自己排空：回合被 `turn/interrupt` 打断后，它扣住队列里的每条输入，直到客户端用 `thread/queue/start` 点名启动（codex-cli 0.163.0 实测：打断后入队的输入 20 秒仍在队列里，`thread/queue/start` 一调就开跑）。所以本轮输入还在队列里、而线程没有在跑的回合时（提交之后，或线程上别的回合结束时），管理模块就调 `thread/queue/start` 启动它；没被扣住的线程在回 `thread/queue/add` 之前就取走了输入，不会发这次调用；被扣住的线程手动启动一轮之后恢复自己排空。线程上有别的回合时引擎拒绝启动，本轮接着排队，等那个回合结束再试。用户在启动请求途中按停止，停止先等启动结果：输入已被取走就等它的回合播报出来再打断，不去撤回一条已不在队列里的输入。本轮设置先经 `thread/settings/update` 写进线程（模型、推理强度、工作目录、沙箱、审批策略），再写队列。这几个队列方法是 experimental 方法，连接必须声明 `experimentalApi` 能力。
 
 **一个原生线程同时只允许一个进程写入。** 引擎对已被占用的线程拒绝 `thread/resume`（`already has an active writer`），`thread/fork` 与 `thread/turns/list` 仍然可用。因此：替换进程（一次性进程接续、线程变化）必须等旧进程真正退出，新进程才能恢复同一个线程；读取线程历史时，遇到被占用的线程直接列举，不再尝试接管它。
 
@@ -195,7 +195,7 @@ Codex、ZCode、Antigravity、OpenCode 共用 `shared/background-work/background
 `server/modules/providers/services/provider-capabilities.service.ts`：
 
 - `deriveCapabilities` 从注册表里的切面**推导**能力——`runtime.permissions` 存在 ⇒ `supportsPermissionRequests`；`sessions.resolveEditAnchor` 存在 ⇒ `supportsMessageEditing`；`fork` 存在 ⇒ `supportsSessionForking`；`sessions.getTokenUsage` 存在 ⇒ `supportsTokenUsage`。
-- 静态部分（权限模式列表、图片/文件/中止/effort）来自 `provider-capabilities.catalog.ts` 的 `PROVIDER_CATALOG`。
+- 静态部分（权限模式列表、图片/文件/中止/effort/压缩）来自 `provider-capabilities.catalog.ts` 的 `PROVIDER_CATALOG`。
 - `provider-capabilities.test.ts` 把推导结果钉在显式基线上：切面增删会以"评审过的测试差异"呈现，而不是静默改能力。
 - **前端零 provider 分支**：composer/设置页完全按 `GET /api/providers/capabilities` 渲染。首屏与请求失败时的回退镜像在 `src/shared/providerCatalogFallback.ts`（`PROVIDER_FALLBACK_CATALOG`），由跨树 parity 测试（`server/modules/providers/tests/provider-catalog-parity.test.ts`）钉住与后端目录一致；**其 key 顺序就是全应用的引擎规范顺序**。
 
@@ -219,7 +219,7 @@ Claude 的模型目录由 `claude-models.provider.ts` 向对话所用的同一�
 - zcode 工具结果：实时事件的 `tool.updated`（旧名 `tool_call_scheduled`）在 `kind=result` 时直接携带 `result.content` 与 `result.success`，`kind=error` 携带 `error`。`ZCodeLiveEventNormalizer` 将它们与 `model_streaming` 的 `tool_result/tool_error` 共用一条转换路径，按原生 `toolCallId` 把输出或错误送回已有工具卡；空字符串是有效的成功输出。实时显示不依赖历史拉取或 SQLite 落库时序。没有内容的异常结果事件记录警告；失败事件即使没有错误正文也发送失败标记，只有索引的成功事件不生成结果正文。独立 `tool_result` 同时携带顶层和嵌套的错误标记，供前端配对与历史卡片使用；历史结果仍由持久化工具记录的 `state.output/state.error` 恢复。
 - zcode 附件通道：上传描述符在 runtime 内映射为 `session/send` 的原生 `attachments` 项（`{kind, filename, mimeType, sizeBytes, localPath}`，localPath 必须绝对；引擎静默丢弃无法映射的形状），不走其余五家的 `<files_input>`/`<images_input>` 文本标签。
 - zcode 发送链路（引擎 0.16.9）：每 turn 的模型选择随 `session/send` 下发（`modelSelection` + `modelExecution`，均 optional——本地 `cli/config.json` 配置不完整时降级省略，由引擎默认模型执行，不阻断发送）；引擎所需的 personal provider registry 由服务端从 `cli/config.json` 物化为 `~/.zcode/cli/cloudcli-provider-config.json` 并随 spawn env 注入，环境继承的 `ZCODE_*_PROVIDER_CONFIG_FILE`（ZCode App 会话残留）一律剥离，注入以 cloudcli 的解析为权威。
-- zcode 账号套餐：模型目录按白名单提取 `GLM-5.3` 和 `GLM-5.3-Flash`。有唯一且可解密的个人套餐 API Key 时，个人分组的模型值使用 ZCode 原生 `account:bigmodel-individual-coding-plan/模型名`，旧会话保存的 `bigmodel-coding-plan` 和 `builtin:bigmodel-coding-plan` 模型引用在发送时也解析到该账号；同名自定义 provider 保持自身路由。没有该凭证时保留本地 provider 路径。有可解密的 `zcodejwttoken` 时，体验分组提供 `account:bigmodel-start-plan/GLM-5.3-Flash`。`buildZCodeSendModelParams` 和 `interaction/requestProviderRuntimeHeaders` 为各账号套餐使用对应凭证；显式账号套餐缺少凭证时发送失败，不降级到引擎默认模型。引擎启动时账号类 provider 默认未授权；`ZCodeProtocolClient` 根据凭证同步可用套餐的 entitlement，进程重启后重新同步。恢复会话时，本次选择与引擎保存的选择不一致就同步会话模型，供子代理继承。多份个人套餐 Key 无法确定账号时，不自动选择其中一份。
+- zcode 账号套餐：个人分组模型目录按白名单提取 `GLM-5.3` 和 `GLM-5.3-Flash`。有唯一且可解密的个人套餐 API Key 时，个人分组的模型值使用 ZCode 原生 `account:bigmodel-individual-coding-plan/模型名`，旧会话保存的 `bigmodel-coding-plan` 和 `builtin:bigmodel-coding-plan` 模型引用在发送时也解析到该账号；同名自定义 provider 保持自身路由。没有该凭证时保留本地 provider 路径。有可解密的 `zcodejwttoken` 时，体验分组模型清单由 `zcode-start-plan-catalog.ts` 从套餐账务接口 `billing/current` 的权益推导：每个生效套餐 `capabilities` 里的 `model:*` 条目即一个模型，`show_name` 提供规范大小写，跨套餐按大小写不敏感的模型 id 去重；读取带 30 秒 TTL 缓存，读不到（无凭证、网络失败、无有效权益）时回退到钉死的 `account:bigmodel-start-plan/GLM-5.3-Flash`。`buildZCodeSendModelParams` 和 `interaction/requestProviderRuntimeHeaders` 为各账号套餐使用对应凭证；显式账号套餐缺少凭证时发送失败，不降级到引擎默认模型。引擎启动时账号类 provider 默认未授权；`ZCodeProtocolClient` 根据凭证同步可用套餐的 entitlement，进程重启后重新同步。恢复会话时，本次选择与引擎保存的选择不一致就同步会话模型，供子代理继承。多份个人套餐 Key 无法确定账号时，不自动选择其中一份。
 - 运行期统一分发：`services/provider-runtime.service.ts`（`providerRuntimeService`：`run` / `abort` / `getRunner` / `resolveToolApproval` / `getPendingApprovalsForSession`）。
 
 ## OpenCode 服务客户端（v2）
@@ -283,7 +283,7 @@ opencode 的自动命名由引擎自己做，CloudCLI 只负责不挡路。引�
 1. **类型**：`shared/protocol/chatEvents.ts` 扩展 `LLMProvider` 联合类型（全仓类型联动会指出所有必改点）。**只需改这一处**——前后端都从这里 re-export。
 2. **目录**：新建 `server/modules/providers/list/<name>/`，尽量复用基类（`AbstractProvider` / `McpProvider` / `SkillsProvider` / `SqliteSessionSynchronizer` / `cli-engine-path`），写 `<name>.provider.ts` 组装七切面。
 3. **注册**：`provider.registry.ts` 的 `providers` 记录加一行（漏了编译报错）。同步器声明 `getSessionWatchTarget()` 后，`sessions-watcher.service.ts` 自动纳管，**不需要改 watcher**。
-4. **能力**：`services/provider-capabilities.catalog.ts` 的 `PROVIDER_CATALOG` 补静态目录（权限模式、默认模型、images/files/abort/effort）；可选能力靠切面自动推导（要报账号配额就给 auth 切面加 `getQuota`，并在载荷里声明 `partitioning`）。同步更新前端镜像 `src/shared/providerCatalogFallback.ts`（parity 测试会强制）。
+4. **能力**：`services/provider-capabilities.catalog.ts` 的 `PROVIDER_CATALOG` 补静态目录（权限模式、默认模型、images/files/abort/effort/compaction）；可选能力靠切面自动推导（要报账号配额就给 auth 切面加 `getQuota`，并在载荷里声明 `partitioning`）。同步更新前端镜像 `src/shared/providerCatalogFallback.ts`（parity 测试会强制）。
 5. **接线**：需要被 agent/git 等模块直接拿 runner 时，在 `server/index.ts` 用 `providerRuntimeService.getRunner(...)` 注入；需要登录流则更新 `src/modules/provider-auth/ProviderLoginModal.tsx`。
 6. **前端外观**：`src/shared/ui/LLMProviderLogo.tsx` 加 Logo、`src/shared/providerDisplay.ts` 加显示名。composer 无需改动——它按能力矩阵渲染。
 
@@ -332,6 +332,29 @@ claude 的 `/limit-reset` 端点存在但无可验证的卡，暂未接入）。
 前端为首屏与请求失败保留一份镜像 `src/shared/mcpCapabilitiesFallback.ts`，
 由 `provider-catalog-parity.test.ts` 跨树钉住——这正是它此前缺的：
 旧的三张散表没有守卫，Cursor 明明会写 `cwd`，表里却写着不支持，工作目录字段因此对 Cursor 用户一直不可见。
+
+**会话压缩（`/compact`）是静态能力 `supportsCompaction`**：前端只在为真时往斜杠菜单里加 `/compact`，
+它和技能一样作为消息文本发给引擎，不走 cloudcli 内置命令。各家怎么压缩的差异收在运行时里：
+claude、zcode、antigravity 的引擎自己从提示词里认出 `/compact`，原样透传；
+codex 和 opencode 的引擎只认专门的调用，运行时用 `readCompactCommand` 认出命令后改调
+`thread/compact/start`（codex，应答不带回合 id，常驻会话先把这一轮标成已领取，下一个宣布的回合就是压缩）
+和 `POST /api/session/:id/compact`（opencode，压缩失败时执行照样报成功，失败只能从 `session.compaction.failed` 显示）。
+这两家不接受附加说明，`/compact <说明>` 直接报错，不把说明丢掉。cursor 不支持。
+zcode 不需要另发 `session/compact`：引擎的这个方法内部也是 `submitPrompt("/compact")`，落盘结果与 ZCode app 手动压缩一致。
+antigravity 的 `-p` 模式会先让模型回一轮，再生成压缩检查点，这是 agy 自身行为。
+
+**压缩在时间线上只有一种行**：五家都用 `createCompactionMessage`（`server/shared/utils.ts`）生成 assistant `text` 行，
+`content` 是一句话（`Compacted · manual · 334k → 19k tokens · 2m 20s` / `Compacting conversation…` / `Compaction failed: …`），
+`compact` 字段带阶段、触发方式与数字；引擎留下的摘要另成一行 `isCompactSummary`，由前端折进压缩行。
+进行中与结束用同一个 id，实时与历史由同一条引擎记录推导 id：
+
+| 引擎 | 压缩行来源（实时 / 历史） | id | 摘要 |
+| --- | --- | --- | --- |
+| claude | `status: compacting`、`compact_boundary` | `${行}_compact` | `isCompactSummary` 记录 |
+| codex | `contextCompaction` 项开始 / 完成 | 项 id | 无 |
+| opencode | `session.compaction.started/ended/failed` / `compaction` 消息 | `${压缩输入 id}_compaction` | 历史读消息的 `summary` |
+| zcode | `session.updated` 里 `operationId: cmp_…` 的进度（引擎把内部事件统一转成 `session.updated`，只能按载荷认）/ 时间线消息的 `compaction` part | `${part id}_compact` | 实时取 `querySource: compact` 的正文、历史取被引擎标成 hidden 的 `compact_summary` 消息，id `${摘要消息 id}_summary` |
+| antigravity | `step_update` 的 `checkpoint` / `CHECKPOINT` 步骤 | `msg_${会话}_${步}_compact` | 历史读步骤正文 |
 
 ## 差异吃在适配器里，不漏给前端
 
@@ -475,7 +498,9 @@ id 必须字节相同。** 这条有两道闸门守着：
 
 - **一次性 CLI 的异步任务会被静默掐死**：`agy` 的一次性 print 模式（`agy -p "<prompt>"`）在 root agent 转入 idle 后只等几秒就关停整个 CLI，日志为 `root agent idle; waiting up to 5s for N background task(s)` → `terminating N background task(s) on exit`。子代理和被放到后台执行的 `run_command` 都在这里死掉，而 CLI 仍然吐出 `status: SUCCESS`，于是前端收到 complete、任务看着「做完了」，真正的结果永远不会回来。antigravity runtime 因此把这一轮的 prompt 作为一行 NDJSON（`{"event":"user","message":{"content":"…"}}`）写进 stdin 并用 `--input-format stream-json` 启动：stdin 保持打开 → CLI 不自行关停 → 异步任务跑完，结果照常从 stream 回流；收到 `result` 事件后再关闭 stdin 让进程退出。**prompt 一旦退回 argv，这个保护就没了。**
 
-  stream-json 模式下，`agy` 自己等子代理和后台 `run_command` 全部结束才发出 `result`：后台命令的 `tool` step 一直保持 `ACTIVE` 直到命令退出，子代理回报只是一条不带正文的 `system_message` step。所以 `result` 就是整轮的终点，runtime 收到它后把仍登记的子代理结算为 `completed`、清空输入框卡片、关 stdin、发 `complete`。子代理取自 `invoke_subagent` 的 DONE step（`step_type: "subagent"`，`subagent_info.subagents[].conversation_id`），每个 agent 一张 `Agent` 卡，输入框卡片通过 `backgroundTasks.list(sessionId)` 切面从登记簿推出。
+  stream-json 模式下，`agy` 自己等子代理和后台 `run_command` 全部结束才发出 `result`：后台命令的 `tool` step 一直保持 `ACTIVE` 直到命令退出，子代理回报只是一条不带正文的 `system_message` step。runtime 在子代理运行期间定期读取主会话的原始记录，收到 `system_message` 时也立即对账；正文省略的实时通知本身不表示某个子代理完成。只有记录中带发送者 ID 的正式 `<SYSTEM_MESSAGE>` 回报能提前结算对应子代理：先送达它的最后工作内容，再发 `task_status: completed`，从登记簿移除并更新输入框卡片。普通正文、用户输入和子代理中间的 DONE 回复不会触发提前结算。主会话继续运行，其他子代理不受影响；重复启动与回报不重复结算。记录未变化时只检查文件元数据，compact 与 full 记录分别追踪。`result` 是整轮的终点，runtime 收到它后停止回报对账，把仍登记的子代理按自身记录结算为完成、失败或停止，清空输入框卡片、关 stdin、发 `complete`；进程退出或中断时，未结算的子代理按停止收尾。子代理取自 `invoke_subagent` 的 DONE step（`step_type: "subagent"`，`subagent_info.subagents[].conversation_id`），每个 agent 一张 `Agent` 卡，输入框卡片通过 `backgroundTasks.list(sessionId)` 切面从登记簿推出。
+
+  历史中的 `invoke_subagent` 同时支持单 Agent 的平铺参数和批量 `Subagents` 数组；启动回执支持单数 `Created the following subagent:` 与复数形式。每个调用按 planner 步号和工具位置绑定自己的回执，再用回执中的会话 ID 构建与实时一致的 Agent 卡片身份；刷新和重新进入会话保留状态、回报与内部工作记录。缺少或损坏回执时不猜测会话 ID，也不把启动回执当成相邻工具的输出。
 
   **绝不能给 agy 传 `--print-timeout`**：它限制的是整轮时长，到点时 agy 会在子代理仍在运行时提前吐出 `status: SUCCESS` 的 `result`，runtime 一关 stdin，agy 就把子代理连同工作一起掐掉，前端还显示完成。agy 的默认值 0 表示等这一轮跑完。防卡死由服务端负责：stdin 由我们持有，`result` 一旦走不到（CLI 崩溃、stdout 被截断、result 行被 agy 穿插的纯文本搞坏导致 JSON 解析失败），进程和这次 run 会无限期挂住，所以 runtime 自带一个**以 stdout 活动续期的看门狗**（`idleTimeout` / `CLOUDCLI_ANTIGRAVITY_IDLE_TIMEOUT`，默认 30 分钟），到期 SIGTERM 并按失败收尾。主 agent 等子代理期间主流完全静默，所以一个连续 30 分钟没有任何输出的子代理也会被看门狗结束。另有一个例外：agy 的 interrupted-stream result 不是终态（它会自行注入续跑提示），在它上面关 stdin 或发 `complete` 都会让前端以为这轮结束、甚至掐死异步工作，所以只有真正的 result 才收尾。
 

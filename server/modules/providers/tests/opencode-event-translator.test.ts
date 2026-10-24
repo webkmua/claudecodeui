@@ -358,3 +358,32 @@ test('a subagent call the run ended on is settled as stopped', () => {
   assert.equal(frames[0].toolUseId, SUBAGENT_CALL);
   assert.deepEqual(translator.settleOpenSubagents(), [], 'settling twice sends nothing new');
 });
+
+test('a compaction is one row named after its input: running, then done', () => {
+  const translator = new OpenCodeSessionEventTranslator(SESSION);
+  const [running] = translator.translate(event('session.compaction.started', { reason: 'manual', inputID: 'msg_compact' })).frames;
+  assert.equal(running.id, 'msg_compact_compaction');
+  assert.equal(running.content, 'Compacting conversation…');
+  assert.deepEqual(running.compact, { phase: 'running', trigger: 'manual' });
+
+  const ended = translator.translate(event('session.compaction.ended', { reason: 'auto', inputID: 'msg_compact' }));
+  assert.equal(ended.frames.length, 1);
+  assert.equal(ended.frames[0].id, 'msg_compact_compaction');
+  assert.equal(ended.frames[0].kind, 'text');
+  assert.equal(ended.frames[0].role, 'assistant');
+  assert.equal(ended.frames[0].content, 'Compacted · auto');
+  assert.equal(ended.terminal, undefined);
+});
+
+test('a failed compaction surfaces its error, because the execution still reports success', () => {
+  const translator = new OpenCodeSessionEventTranslator(SESSION);
+  const failed = translator.translate(event('session.compaction.failed', {
+    reason: 'manual',
+    inputID: 'msg_compact',
+    error: { type: 'provider.quota', message: 'Free usage limit reached.' },
+  }));
+  assert.equal(failed.frames.length, 1);
+  assert.equal(failed.frames[0].id, 'msg_compact_compaction');
+  assert.equal(failed.frames[0].content, 'Compaction failed: Free usage limit reached.');
+  assert.deepEqual(failed.frames[0].compact, { phase: 'failed', trigger: 'manual', error: 'Free usage limit reached.' });
+});

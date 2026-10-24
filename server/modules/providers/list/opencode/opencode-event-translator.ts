@@ -34,7 +34,9 @@ import { LOCAL_AGENT_TASK_TYPE, createTaskStatusMessage } from '@/modules/provid
 import type { NormalizedMessage } from '@/shared/types.js';
 import {
   compactProviderPayload,
+  createCompactionMessage,
   createNormalizedMessage,
+  generateMessageId,
   hasVisibleText,
   readObjectRecord,
   readOptionalString,
@@ -139,6 +141,36 @@ const readErrorMessage = (error: unknown): string => {
     ?? readOptionalString(record?.type)
     ?? 'Unknown OpenCode error';
 };
+
+/**
+ * The timeline row of a compaction (running, done or failed), as every
+ * provider draws one (`createCompactionMessage`).
+ *
+ * The engine persists a compaction as a `compaction` session message whose id
+ * is the `inputID` its live events carry, so naming the row after it gives
+ * the live stream and the history read the same row. `reason` is the engine's
+ * `manual` / `auto`. Consumers: this translator (live) and the OpenCode
+ * sessions provider (history).
+ */
+export function createOpenCodeCompactionFrame(input: {
+  inputId: string | null | undefined;
+  sessionId: string | null;
+  timestamp: string;
+  phase: 'running' | 'done' | 'failed';
+  reason?: unknown;
+  error?: unknown;
+}): NormalizedMessage {
+  const reason = readOptionalString(input.reason);
+  return createCompactionMessage({
+    id: `${input.inputId ?? generateMessageId(PROVIDER)}_compaction`,
+    sessionId: input.sessionId,
+    timestamp: input.timestamp,
+    provider: PROVIDER,
+    phase: input.phase,
+    ...(reason === 'manual' || reason === 'auto' ? { trigger: reason } : {}),
+    ...(input.phase === 'failed' ? { error: readErrorMessage(input.error) } : {}),
+  });
+}
 
 /**
  * Per-session translator. One instance lives for the life of a run (or a
@@ -347,6 +379,25 @@ export class OpenCodeSessionEventTranslator {
         const notice = readBackgroundNotice(readObjectRecord(item?.payload)?.metadata);
         return notice ? { frames: [], notice } : { frames: [] };
       }
+
+      case 'session.compaction.started':
+      case 'session.compaction.ended':
+      case 'session.compaction.failed':
+        // Manual (`/compact`) and automatic compactions alike. A failed one
+        // still ends its execution as succeeded, so the failure is shown here
+        // or nowhere.
+        return {
+          frames: [createOpenCodeCompactionFrame({
+            inputId: readOptionalString(data.inputID),
+            sessionId: this.sessionId,
+            timestamp,
+            phase: event.type === 'session.compaction.started'
+              ? 'running'
+              : event.type === 'session.compaction.failed' ? 'failed' : 'done',
+            reason: data.reason,
+            error: data.error,
+          })],
+        };
 
       case 'session.execution.started':
         return { frames: [], executionStarted: true };
