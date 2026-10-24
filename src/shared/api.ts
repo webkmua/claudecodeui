@@ -5,7 +5,7 @@ import {
   storeAuthToken,
 } from '@/shared/authToken';
 import { collectStoredOutputAssets, IS_PLATFORM } from '@/shared/utils';
-import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
+import { isValidCustomVoiceUrl, readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
 // defaults below can be merged with a caller's headers by spreading.
@@ -698,7 +698,7 @@ export function transcribeVoice(blob: Blob, filename: string): Promise<Response>
   const config = readVoiceConfig();
   const body = new FormData();
 
-  if (config.baseUrl.trim()) {
+  if (isValidCustomVoiceUrl(config.baseUrl)) {
     body.append('file', blob, filename);
     body.append('model', config.sttModel || 'whisper-1');
     return fetch(voiceDirectUrl(config.baseUrl.trim(), '/audio/transcriptions'), {
@@ -719,7 +719,7 @@ export function transcribeVoice(blob: Blob, filename: string): Promise<Response>
 export function synthesizeVoice(text: string, signal: AbortSignal): Promise<Response> {
   const config = readVoiceConfig();
 
-  if (config.baseUrl.trim()) {
+  if (isValidCustomVoiceUrl(config.baseUrl)) {
     return fetch(voiceDirectUrl(config.baseUrl.trim(), '/audio/speech'), {
       method: 'POST',
       headers: {

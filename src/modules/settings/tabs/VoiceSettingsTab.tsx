@@ -44,9 +44,32 @@ export default function VoiceSettingsTab() {
 
       {voiceEnabled && (
         <SettingsSection title={t('voiceSettings.backendTitle')} description={t('voiceSettings.backendDescription')}>
-          <div className="space-y-4">
+          <form className="space-y-4" autoComplete="off" onSubmit={(e) => e.preventDefault()}>
+            {/* Fake inputs to trap Chrome aggressive credentials autofill */}
+            <input
+              type="text"
+              name="fake_user_remembered"
+              tabIndex={-1}
+              aria-hidden="true"
+              style={{ position: 'absolute', opacity: 0, height: 0, width: 0, pointerEvents: 'none' }}
+              autoComplete="username"
+            />
+            <input
+              type="password"
+              name="fake_password_remembered"
+              tabIndex={-1}
+              aria-hidden="true"
+              style={{ position: 'absolute', opacity: 0, height: 0, width: 0, pointerEvents: 'none' }}
+              autoComplete="current-password"
+            />
+
             <Field
               label={t('voiceSettings.baseUrl')}
+              type="url"
+              name="voice_custom_base_url"
+              autoComplete="off"
+              data-form-type="other"
+              data-lpignore="true"
               placeholder="https://api.openai.com/v1"
               value={config.baseUrl}
               onChange={(e) => update({ baseUrl: e.target.value })}
@@ -54,7 +77,10 @@ export default function VoiceSettingsTab() {
             <Field
               label={t('voiceSettings.apiKey')}
               type="password"
-              autoComplete="off"
+              name="voice_custom_api_key"
+              autoComplete="new-password"
+              data-form-type="other"
+              data-lpignore="true"
               placeholder="sk-…"
               value={config.apiKey}
               onChange={(e) => update({ apiKey: e.target.value })}
@@ -62,31 +88,39 @@ export default function VoiceSettingsTab() {
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
               <Field
                 label={t('voiceSettings.sttModel')}
+                name="voice_custom_stt_model"
+                autoComplete="off"
                 placeholder="whisper-1"
                 value={config.sttModel}
                 onChange={(e) => update({ sttModel: e.target.value })}
               />
               <Field
                 label={t('voiceSettings.ttsModel')}
+                name="voice_custom_tts_model"
+                autoComplete="off"
                 placeholder="tts-1"
                 value={config.ttsModel}
                 onChange={(e) => update({ ttsModel: e.target.value })}
               />
               <Field
                 label={t('voiceSettings.voice')}
+                name="voice_custom_tts_voice"
+                autoComplete="off"
                 placeholder="alloy"
                 value={config.ttsVoice}
                 onChange={(e) => update({ ttsVoice: e.target.value })}
               />
               <Field
                 label={t('voiceSettings.format')}
+                name="voice_custom_tts_format"
+                autoComplete="off"
                 placeholder="mp3"
                 value={config.ttsFormat}
                 onChange={(e) => update({ ttsFormat: e.target.value })}
               />
             </div>
             <p className="text-xs text-muted-foreground">{t('voiceSettings.note')}</p>
-          </div>
+          </form>
         </SettingsSection>
       )}
     </div>

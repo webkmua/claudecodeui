@@ -30,6 +30,11 @@ export const VOICE_CONFIG_DEFAULTS: VoiceConfig = {
   ttsFormat: '',
 };
 
+export function isValidCustomVoiceUrl(baseUrl: string): boolean {
+  const trimmed = baseUrl.trim();
+  return /^https?:\/\//i.test(trimmed);
+}
+
 export function readVoiceConfig(): VoiceConfig {
   try {
     const raw = localStorage.getItem(VOICE_CONFIG_STORAGE_KEY);
@@ -41,6 +46,11 @@ export function readVoiceConfig(): VoiceConfig {
     const config = { ...VOICE_CONFIG_DEFAULTS };
     for (const key of Object.keys(VOICE_CONFIG_DEFAULTS) as (keyof VoiceConfig)[]) {
       if (typeof parsed[key] === 'string') config[key] = parsed[key];
+    }
+    // Sanitize: A valid custom base URL must start with http:// or https://.
+    // Non-URL strings injected by browser password autofill (e.g. usernames) are discarded.
+    if (config.baseUrl && !isValidCustomVoiceUrl(config.baseUrl)) {
+      config.baseUrl = '';
     }
     return config;
   } catch {

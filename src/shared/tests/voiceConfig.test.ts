@@ -102,3 +102,15 @@ test('each read returns its own object, so a caller cannot mutate the defaults',
   assert.equal(readVoiceConfig().apiKey, '');
   assert.equal(VOICE_CONFIG_DEFAULTS.apiKey, '');
 });
+
+test('a non-URL baseUrl from browser autofill is discarded as empty', () => {
+  write({ baseUrl: 'webkmua', apiKey: 'sk-test' });
+
+  assert.equal(readVoiceConfig().baseUrl, '');
+});
+
+test('a valid http or https baseUrl is retained', () => {
+  write({ baseUrl: 'https://custom-voice.example.com/v1', apiKey: 'sk-test' });
+
+  assert.equal(readVoiceConfig().baseUrl, 'https://custom-voice.example.com/v1');
+});

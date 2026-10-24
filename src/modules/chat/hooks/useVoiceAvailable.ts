@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { api } from '@/shared/api';
 import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
-import { readVoiceConfig, VOICE_CONFIG_SYNC_EVENT } from '@/shared/voiceConfig';
+import { isValidCustomVoiceUrl, readVoiceConfig, VOICE_CONFIG_SYNC_EVENT } from '@/shared/voiceConfig';
 
 // Voice UI is gated on the `voiceEnabled` UI preference (toggled in Quick Settings /
 // the Settings modal) and a configured voice backend.
@@ -39,7 +39,7 @@ export function useVoiceAvailable(): boolean {
         setAvailable(false);
         return;
       }
-      if (readVoiceConfig().baseUrl.trim()) {
+      if (isValidCustomVoiceUrl(readVoiceConfig().baseUrl)) {
         setAvailable(true);
         return;
       }
