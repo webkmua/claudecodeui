@@ -214,6 +214,15 @@ export async function initializeSessionsWatcher(): Promise<void> {
   });
 
   for (const provider of providerRegistry.listProviders()) {
+    try {
+      const auth = await provider.auth.getStatus();
+      if (!auth.installed) {
+        continue;
+      }
+    } catch {
+      // Degrade gracefully if status probing throws
+    }
+
     const watchTarget = provider.sessionSynchronizer.getSessionWatchTarget();
     const { rootPath } = watchTarget;
 
