@@ -1528,8 +1528,8 @@ async function queryCodex(
             : [];
           return {
             'features.defer_mailbox_preemption': true,
-            // TASK-2026-00191: route Z.AI/* picker models through ccr
-            ...(typeof resolvedModel === 'string' && resolvedModel.startsWith('Z.AI/') ? { model_provider: 'ccr' } : {}),
+            // TASK-2026-00191: route custom picker models through ccr
+            ...(typeof resolvedModel === 'string' && (resolvedModel.startsWith('Z.AI/') || resolvedModel.startsWith('Codex API/') || resolvedModel.startsWith('ollama/')) ? { model_provider: 'ccr' } : {}),
             ...(residentTaskMcpOptions?.config ?? {}),
             ...(residentTaskMcpOptions ? {
               'shell_environment_policy.exclude': [...new Set([
@@ -1625,8 +1625,8 @@ async function queryCodex(
         approvalPolicy,
         config: {
           'features.defer_mailbox_preemption': true,
-          // TASK-2026-00191: route Z.AI/* picker models through ccr
-          ...(typeof resolvedModel === 'string' && resolvedModel.startsWith('Z.AI/') ? { model_provider: 'ccr' } : {}),
+          // TASK-2026-00191: route custom picker models through ccr
+          ...(typeof resolvedModel === 'string' && (resolvedModel.startsWith('Z.AI/') || resolvedModel.startsWith('Codex API/') || resolvedModel.startsWith('ollama/')) ? { model_provider: 'ccr' } : {}),
           ...(taskMcpOptions?.config ?? {}),
           ...(taskMcpOptions ? {
             'shell_environment_policy.exclude': [...new Set([
