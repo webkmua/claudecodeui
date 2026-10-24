@@ -14,6 +14,8 @@ import {
   writeJsonConfig,
 } from '@/shared/utils.js';
 
+import { tryResolveEnginePath } from './zcode-engine-path.js';
+
 /**
  * ZCode config files keep MCP servers under the nested `mcp.servers` key
  * (integration plan §3.2.6, verified against the ZCode bundle). The `mcp`
@@ -86,6 +88,9 @@ export class ZCodeMcpProvider extends McpProvider {
     }
 
     // User scope: ~/.zcode/cli/config.json
+    if (!tryResolveEnginePath()) {
+      return {}; // ZCode is not installed or disabled; do not access or create ~/.zcode
+    }
     const configPath = path.join(os.homedir(), '.zcode', 'cli', 'config.json');
     try {
       return readServerRecords(await readJsonConfig(configPath));
@@ -125,6 +130,9 @@ export class ZCodeMcpProvider extends McpProvider {
     }
 
     // User scope: ~/.zcode/cli/config.json
+    if (!tryResolveEnginePath()) {
+      return; // ZCode is not installed or disabled; do not create ~/.zcode
+    }
     const configPath = path.join(os.homedir(), '.zcode', 'cli', 'config.json');
 
     let config: Record<string, unknown>;
