@@ -1,6 +1,6 @@
 # Provider 架构与接入指南
 
-> 基准：2.12.0 / 2026-10-23
+> 基准：2.13.0 / 2026-10-24
 > **核心文档**：改动 `server/modules/providers/**` 或 `server/shared/{types,interfaces}.ts` 时**必须同步更新本文**。
 > 普通 bug 修复不动架构的不需要更新（提交时走 `--no-verify`，见 `AGENTS.md`）。
 > 引用一律给"文件路径 + 符号名"，不用行号。
@@ -47,7 +47,7 @@
 
 **引擎自发的回合走会话通道**：引擎为汇报后台结果自己起的回合不属于用户那一轮，它的事件经 `chatRunRegistry` 的会话通道发出（见 chat.md 的会话通道），由装配层注入的发布入口交给网关编号和投递；运行时自己不向浏览器发包。
 
-**常驻进程的宿主任务凭证走窄桥接**：常驻进程活过发起它的那一轮，进程环境里的每轮能力令牌会一直有效，所以常驻进程带的是一枚窄桥接凭证（绑定用户、应用会话与进程代次）。桥接凭证本身没有任何任务权限：MCP 把引擎自己的调用身份（`tools/call` 元数据里的 `callId`、`threadId` 与 `x-codex-turn-metadata.turn_id`）交给宿主，宿主只接受它确实观测到的那次引擎调用，并用那一轮的能力执行任务。调用快照包含进程代次、原生线程、回合、调用 id、工具名和参数摘要；JSON 对象键序不影响摘要，数组顺序保留。回调必须命中同一快照，登记幂等按原生调用身份决定，HTTP 或 stdio 请求序号不决定任务身份。重复事件不能改写既有快照，原生事件校验失败只关闭所属会话。旧轮次、别的线程、参数被替换、引擎没报过的调用一律拒绝；启用全局 API Key 时常驻进程不接触该 Key，桥接入口挂在通用 API Key 中间件之前并自行鉴权。
+**常驻进程的宿主任务凭证走窄桥接**：常驻进程活过发起它的那一轮，进程环境里的每轮能力令牌会一直有效，所以常驻进程带的是一枚窄桥接凭证（绑定用户、应用会话与进程代次）。桥接凭证本身没有任何任务权限：MCP 把引擎自己的调用身份（`tools/call` 元数据里的 `callId`、`threadId` 与 `x-codex-turn-metadata.turn_id`）交给宿主，宿主只接受它确实观测到的那次引擎调用，并用那一轮的能力执行任务。调用快照包含进程代次、原生线程、回合、调用 id、工具名和参数摘要；JSON 对象键序不影响摘要，数组顺序保留。回调必须命中同一快照，登记幂等按原生调用身份决定，HTTP 或 stdio 请求序号不决定任务身份。重复事件不能改写既有快照，原生事件校验失败只关闭所属会话。旧轮次、别的线程、参数被替换、引擎没报过的调用一律拒绝；启用全局 API Key 时常驻进程不接触该 Key，桥接入口挂在通用 API Key 中间件之前并自行鉴权。任务续接开关关着时，每轮没有能力令牌，引擎调用不会登记；桥接入口先查开关，直接返回 `TASK_CONTINUATIONS_DISABLED`（409），不等待观测。MCP 把宿主错误体里 `error.code` 与说明原样带给模型。
 
 ## Codex 自动标题
 
@@ -87,6 +87,12 @@ Codex app-server（0.159.2+）在协议层面支持脱离父回合的工具结�
 ```
 引擎以工具结果为契机唤醒新回合汇报。`codex-thread-items.ts` 只把名称为 `cloudcli_task_result` 的孤立 `FunctionCallOutput` / `functionCallOutput` 归一化为纯说明性质的 `status_note`，不生成缺失前置调用的残缺工具卡，也不伪造用户提问。其他工具的输出不会被误认成异步任务通知。其他引擎（Claude 等）保持其原生的输入流保持机制，第一版异步任务外部接续由 Codex 首发支持。
 
+**宿主任务的任务条卡片与停止**：`cloudcli_task_run` 的命令跑在宿主起的独立 worker 里，引擎不知道它，所以卡片由宿主出。任务模块的 `task-host-cards.service.ts` 列出卡片：状态为 `running`、没有记录异常、且 worker 心跳新鲜的任务，才画一张 `Bash` 卡。心跳是任务目录里的 `worker.alive`：worker 在启动命令前写好、运行中每 5 秒刷新一次修改时间，超过 60 秒没刷新就当 worker 已死；卡片 id 和停止句柄都是任务 id。装配层通过 `setCodexHostTaskSource` 把列表和停止交给 Codex 运行时：运行时的任务条列表是引擎 agent 在前、宿主任务在后，所有任务条帧（包括进程回收时结算 agent 的那一帧）都由同一个函数组装、带全量，agent 的帧不会抹掉宿主卡；`stopBackgroundTask` 转给宿主。任务开始、结束、worker 异常退出或从磁盘补录结果时，任务模块通知装配层，由它在会话通道上重发整张任务条。
+
+宿主任务不算引擎后台工作，不进 `listBackgroundWork`：续接派发、排队消息和定时消息都不等它，任务 A 的汇报不会被还在跑的任务 B 挡住。只剩宿主任务时，Codex 运行时回答 `queuesInput: false`（可直接发消息）和 `canInterrupt: false`（没有引擎运行可取消，只按卡片逐个停）；还有 agent 或引擎自发汇报时沿用引擎原规则。
+
+停止走任务目录，不走信号：宿主只对显示着卡片的任务受理，在任务目录里建空文件 `stop`；worker 每 500 毫秒查一次，看到后对自己连接上的命令发 `command/exec/terminate`（实测会连同子进程一起结束，`command/exec` 随即以 137 返回）。terminate 失败（比如命令还没在 app-server 登记）时每 500 毫秒重试，20 次仍失败就关闭这条连接，app-server 退出时带走命令。被停下的命令记为 `cancelled`；结果进入任务记录前（实时回调和磁盘恢复两条路径），任务目录里有宿主写的 `stop` 请求的 `cancelled` 结果会先取消续接通知，卡片随结果收掉、不续开汇报轮。别处报来的 `cancelled`（没有 `stop` 请求）照常汇报。worker 按退出码判定：停止后命令以非 0 结束记 `cancelled`（停止前已经自行失败的命令也会这样记），以 0 结束记 `completed` 并照常汇报（包括捕获终止信号后以 0 退出的命令）。terminate 重试用尽、只能关连接时，结果同样记 `cancelled`，但写明停止未确认、命令可能还在运行（关连接只结束 app-server，不保证它起的命令一起退出）。宿主在线时 worker 退出会立刻收卡；宿主离线期间 worker 死掉，重启后最多再显示 60 秒旧卡，这期间点中止会被受理但没人执行。用文件和心跳，是为了宿主重启后照样能停、能判断 worker 死活，不依赖 pid，也就不会被复用了 pid 的别的进程骗过。升级前起的任务没有心跳，不显示卡片。
+
 ## Claude 转录记录边界
 
 Claude JSONL 同时保存真实对话和模型请求诊断快照。例如，`api-request-blob` 的 `message.role` 可以是 `user`，正文也可以完整复制原提问。快照不代表用户又发送了一次消息。
@@ -97,7 +103,7 @@ Claude JSONL 同时保存真实对话和模型请求诊断快照。例如，`api
 
 ## Claude 后台任务生命周期
 
-`list/claude/claude-background-work.ts` 是后台执行记录和输入框任务卡片的共同归属者。调用刚发出时先记录待确认任务，`task_started` 将引擎任务 id 关联到工具调用 id；完成通知、终态更新和工具失败都收掉同一条记录，并立即广播当前列表。子代理内部启动的任务保留停止句柄，但不进入父会话的卡片列表。`TaskCreate` 只写待办项，不属于后台执行。
+`list/claude/claude-background-work.ts` 是后台执行记录和输入框任务卡片的共同归属者。调用刚发出时先记录待确认任务，`task_started` 将引擎任务 id 关联到工具调用 id；CLI 自己转入后台的主线程调用（超过超时的前台 `Bash`）调用里没有后台标记，在 `task_started` 时按任务信息补出卡片，否则订阅确认和任务条帧会报"有等待、无卡片"，页面把后台阶段画成回复进行中；完成通知、终态更新和工具失败都收掉同一条记录，并立即广播当前列表。子代理内部启动的任务保留停止句柄，但不进入父会话的卡片列表。`TaskCreate` 只写待办项，不属于后台执行。
 
 卡片身份使用启动工具调用的 id，独立停止使用引擎任务 id。停止句柄既可以由任务启动事件提供，也可以由工具的结构化返回提供；收到句柄时替换并广播卡片快照，实时流和订阅确认使用同一投影。没有停止句柄的等待项只能通过会话取消结束驻留进程，不能把工具调用 id 传给引擎的停止任务接口。
 
@@ -180,7 +186,7 @@ Codex、ZCode、Antigravity、OpenCode 共用 `shared/background-work/background
 | 切面 | 职责 | 关键成员 / 消费服务 |
 | --- | --- | --- |
 | `runtime` | 拉起/中止引擎执行 | `run(command, options, writer, context)`、`abort(sessionId)`；可选 `permissions`（权限批准网关）、`backgroundTasks`（输入框任务条列表；`isPending` 含汇报回复阶段；`canInterrupt` 为 false 表示这批工作 `abort` 已停不了，运行中会话轮询里只剩后台工作的条目也取它）→ `providerRuntimeService` |
-| `models` | 模型目录 | `getSupportedModels()`（引擎目录或预置目录）、`getCurrentActiveModel()`（只读兜底）→ `providerModelsService` |
+| `models` | 模型目录 | `getSupportedModels()`（引擎目录或预置目录）、`getCurrentActiveModel()`（只读兜底）→ `providerModelsService`。每轮起跑前都会读目录，所以要查 CLI 的目录（antigravity、opencode、codex）用 `createStaleWhileRefreshValue`（`server/shared/utils.ts`）：只有首次读取等查询，过期后先用旧目录、后台刷新；Claude 自带同样的处理 |
 | `auth` | 安装/登录状态 | `getStatus()`（"未安装/未登录"是数据不是异常）；可选 `getQuota()`（配额）→ `providerAuthService` |
 | `mcp` | 引擎原生 MCP 配置读写 | `McpProvider` 基类（scope/transport 校验）→ `providerMcpService` |
 | `skills` | 技能发现/写入 | `SkillsProvider` 基类（SKILL.md 扫描）→ `providerSkillsService` |
@@ -230,7 +236,7 @@ opencode 的对话不走一次性子进程，而是连一个 cloudcli 自养的�
 - `opencode-api.client.ts`：会话创建（`location.directory` 锚定项目目录）、模型/角色/权限规则切换、prompt、interrupt、权限与表单答复。模型引用是对象 `{providerID, id, variant}`（variant 即推理力度，`provider/model#effort` 解析）。
 - `opencode-event-stream.ts`：一条全局 `GET /api/event` SSE，按 `data.sessionID` 分发；每次（重）连都重新解析端点，跟随重启换端口的服务；断线退避重连并广播重连事件。
 - `opencode-event-translator.ts`：会话事件 → 时间线帧（text.delta→stream_delta、text.ended→正式 `text` 行+stream_end、reasoning.delta→同 id thinking、tool.*→tool_use/tool_result、execution.*→运行终态与回合开始；后台启动和合成通知另行报给登记表）。事件词表钉在测试夹具里，未知事件类型忽略，防版本漂移。
-- `opencode-interaction-bridge.ts`：`permission.asked` → 权限卡（Allow/记住/拒绝 → `once`/`always`/`reject`）；`form.created`（question 表单）→ `AskUserQuestion` 卡（服务的 `multiselect` 翻译成面板的 `multiSelect`；答复按问题文本映射回 `q0/q1` 字段键，多选按 `", "` 拆分——选项文案含该序列是已知边界）。跳过/拒绝=取消表单并附留言，模型继续而非整步作废。
+- `opencode-interaction-bridge.ts`：`permission.asked` → 权限卡（Allow/记住/拒绝 → `once`/`always`/`reject`）；`form.created`（question 表单）→ `AskUserQuestion` 卡（服务的 `multiselect` 翻译成面板的 `multiSelect`；答复按问题文本映射回 `q0/q1` 字段键，多选按 `", "` 拆分——选项文案含该序列是已知边界）。跳过/拒绝=取消表单并附留言，模型继续而非整步作废。对话里的 `question` 工具调用由 `opencode-question.ts` 翻成同一张 `AskUserQuestion` 卡：`multiple` 翻成 `multiSelect`；历史读取再把 `state.metadata.answers`（按问题顺序的标签数组）按问题文本折进 `answers`。实时翻译器在调用开始时就发卡，那时还没有答案，所以只翻名字和字段。
 - `opencode-session-settings.ts`：权限模式映射——`plan`→只读 plan 角色+全部变更类 ask 规则；`acceptEdits`→仅 shell ask；`bypassPermissions`→无规则（引擎默认全放行）；`default`→全部变更类 ask。**引擎默认角色本身全放行，权限卡完全靠这些 ask 规则出现**；已应用的切换按会话缓存，避免每次发消息重复下发（切 plan 会附带一条系统提醒）。
 - `opencode-run-registry.ts`：会话登记（运行、后台工作、引擎汇报回合任一未完就存活）、事件分发、首结算生效；断线重连后按 `GET /api/session/:id` 的 `outcome`/`time.idle` 对账，补上错过的终态，避免会话卡在"处理中"。token 预算取自同一接口的 `tokens`，不再读 `opencode.db`。
 - 附件：data-URI 文件块随 prompt 下发（模型真正看到内容），同时保留 `<images_input>`/`<files_input>` 路径标签供历史回读还原。
