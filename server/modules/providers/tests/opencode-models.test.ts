@@ -94,7 +94,7 @@ test('OpenCode falls back to the anchor catalog when nothing dynamic is readable
   const providerIds = new Set(
     OPENCODE_PREDEFINED_MODELS.OPTIONS.map((option) => option.value.split('/')[0]),
   );
-  assert.deepEqual([...providerIds].sort(), ['opencode', 'opencode-go']);
+  assert.deepEqual([...providerIds].sort(), ['opencode', 'opencode-go', 'zai']);
   assert.equal(
     OPENCODE_PREDEFINED_MODELS.OPTIONS.every((option) => /^[a-z0-9-]+\/.+/.test(option.value)),
     true,
@@ -111,7 +111,7 @@ test('OpenCode falls back to the anchor catalog when nothing dynamic is readable
   assert.equal(OPENCODE_PREDEFINED_MODELS.DEFAULT, 'opencode/gpt-5.6-terra');
   assert.deepEqual(
     OPENCODE_PREDEFINED_MODELS.OPTIONS.map((option) => option.value),
-    ['opencode/gpt-5.6-terra', 'opencode-go/glm-5.3'],
+    ['opencode/gpt-5.6-terra', 'opencode-go/glm-5.3', 'zai/glm-5.3-flash', 'zai/glm-5.3'],
   );
   // Effort choices come from `opencode models --verbose` variants; the runtime
   // turns a selected value into `--variant`, so the values have to match the
