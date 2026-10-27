@@ -142,6 +142,7 @@ function Sidebar({
     refreshProjects,
     updateSessionSummary,
     forkSession,
+    setSessionPinned,
     collapseSidebar: handleCollapseSidebar,
     expandSidebar: handleExpandSidebar,
     setShowNewProject,
@@ -166,6 +167,7 @@ function Sidebar({
     setCurrentProject,
     setSidebarVisible: (visible) => setPreference('sidebarVisible', visible),
     sidebarVisible,
+    keepProjectsExpanded: preferences.keepProjectsExpanded,
   });
 
   useEffect(() => {
@@ -225,6 +227,7 @@ function Sidebar({
     onSessionSelect: handleSessionClick,
     onDeleteSession: showDeleteSessionConfirmation,
     onForkSession: forkSession,
+    onSetSessionPinned: setSessionPinned,
     onLoadMoreSessions: loadMoreSessionsForProject,
     onNewSession,
     onStartEditingSession: startEditingSession,

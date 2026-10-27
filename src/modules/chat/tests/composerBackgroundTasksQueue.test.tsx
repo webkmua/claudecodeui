@@ -3,12 +3,14 @@ import assert from 'node:assert/strict';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, test, vi } from 'vitest';
 
+import type * as Api from '@/shared/api';
 import type { Project, ProjectSession } from '@/shared/types';
 
 const authenticatedFetch = vi.fn();
-let serverDrafts: unknown[] = [];
+let serverDrafts: Array<{ scope: string; text: string; queuedMessage: { content: string; attachments?: unknown[] } }> = [];
 
-vi.mock('@/shared/api', () => ({
+vi.mock('@/shared/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof Api>()),
   authenticatedFetch: (...args: unknown[]) => authenticatedFetch(...args),
   api: {
     getFiles: () => Promise.resolve({ ok: false }),
@@ -16,12 +18,27 @@ vi.mock('@/shared/api', () => ({
       list: () => Promise.resolve(new Response(JSON.stringify({ commands: [] }))),
     },
     providers: {
+      capabilities: () => Promise.resolve(new Response('{}', { status: 503 })),
       skills: () => Promise.resolve(new Response(JSON.stringify({ data: { skills: [] } }))),
     },
     user: {
       drafts: () => Promise.resolve(new Response(JSON.stringify({ drafts: serverDrafts }))),
       saveDraft: () => Promise.resolve(new Response('{}')),
       deleteDraft: () => Promise.resolve(new Response('{}')),
+      appendQueuedMessage: async (scope: string, queuedMessage: { content: string; attachments?: unknown[] }) => {
+        const earlier = serverDrafts.find((draft) => draft.scope === scope);
+        const merged = earlier?.queuedMessage ? {
+          ...queuedMessage,
+          content: [earlier.queuedMessage.content, queuedMessage.content].join('\n\n'),
+          attachments: [...(earlier.queuedMessage.attachments ?? []), ...(queuedMessage.attachments ?? [])],
+        } : queuedMessage;
+        serverDrafts = [...serverDrafts.filter((draft) => draft.scope !== scope), { scope, text: '', queuedMessage: merged }];
+        return new Response(JSON.stringify({ queuedMessage: merged, appended: Boolean(earlier?.queuedMessage) }));
+      },
+      clearQueuedMessage: async (scope: string) => {
+        serverDrafts = serverDrafts.filter((draft) => draft.scope !== scope);
+        return new Response('{}');
+      },
     },
   },
 }));
@@ -123,7 +140,7 @@ test('queues message when hasActiveBackgroundTasks is true even if isLoading is 
   assert.equal(readQueuedMessage('session-1')?.content, 'next command');
 });
 
-test('allows forceSendQueuedDraft to send message immediately with forceInterrupt', async () => {
+test.each(['claude', 'zcode'] as const)('%s only offers force send when it can preserve background work', async (provider) => {
   const { useChatComposerState } = await import('@/modules/chat/hooks/useChatComposerState');
 
   const sent: Array<Record<string, unknown>> = [];
@@ -133,7 +150,7 @@ test('allows forceSendQueuedDraft to send message immediately with forceInterrup
       selectedProject,
       selectedSession,
       currentSessionId: 'session-1',
-      provider: 'claude',
+      provider,
       permissionMode: 'bypassPermissions',
       cyclePermissionMode: () => undefined,
       resolvePermissionModeForProvider: () => 'bypassPermissions',
@@ -163,13 +180,19 @@ test('allows forceSendQueuedDraft to send message immediately with forceInterrup
 
   assert.equal(sent.length, 0);
   assert.ok(result.current.queuedDraft);
-  assert.equal(result.current.canForceSendQueuedDraft, true);
+  assert.equal(result.current.canForceSendQueuedDraft, provider !== 'claude');
 
   // User explicitly clicks force send
   await act(async () => {
-    result.current.forceSendQueuedDraft();
+    await result.current.forceSendQueuedDraft();
   });
 
+  if (provider === 'claude') {
+    assert.equal(sent.length, 0);
+    assert.ok(result.current.queuedDraft);
+    assert.equal(serverDrafts[0]?.queuedMessage.content, 'force stop and run');
+    return;
+  }
   await waitFor(() => {
     assert.equal(sent.length, 1, 'message sent after force send');
   });

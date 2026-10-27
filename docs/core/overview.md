@@ -52,6 +52,7 @@ server/
     database/              better-sqlite3 连接、schema、migrations 与 repositories
     assets/                聊天上传资产（~/.cloudcli/assets）的上传与读取
     agent/                 无头 Agent API（API key / 平台模式鉴权）
+    execution/             本机执行 MCP（显式授权、持久化运行、异步查询与取消）
     notifications/         Web Push（VAPID）+ 桌面通知 WS
     plugins/               插件注册表、插件子进程、WS 代理
     scheduled-messages/    定时消息与排队消息（调度器 → 无附着 chat turn）
@@ -84,7 +85,7 @@ docs/
 | 异步任务目录与产物 | `~/.cloudcli/tasks/<taskId>` | 后台命令日志 `output.log` 与原子结果 `result.json`，支持宿主断电/崩溃重启后自动扫描补录入库 |
 | 聊天上传资产 | `~/.cloudcli/assets` | `server/modules/assets`；聊天发送只信任该目录**直接子文件**（`chat-websocket.service.ts` 过滤） |
 | 插件本体与启用状态 | `~/.cloudcli/plugins` + `~/.cloudcli/plugins.json` | `server/modules/plugins`（注册表扫描 + 子进程管理）；首次访问时从旧 `~/.claude-code-ui` 一次性自动迁移（`migrateLegacyPluginPaths`） |
-| 各引擎会话原件 | `~/.claude` / `~/.codex` / `~/.cursor` / `~/.local/share/opencode` / `~/.zcode` / `~/.gemini/antigravity*` | 云 CLI 不复制、不改写；同步器只读解析后把元数据 upsert进 SQLite（`sessions` 表含 `jsonl_path`）；会话名跟随引擎标题，用户在应用内改过名的行带 `name_locked=1` 永不被引擎覆盖 |
+| 各引擎会话原件 | `~/.claude` / `~/.codex` / `~/.cursor` / `~/.local/share/opencode` / `~/.zcode` / `~/.gemini/antigravity*` | 云 CLI 不复制、不改写；同步器只读解析后把元数据 upsert进 SQLite（`sessions` 表含 `jsonl_path`）；会话名跟随引擎标题，用户在应用内改过名的行带 `name_locked=1` 永不被引擎覆盖；用户置顶的行带 `isPinned=1`，项目内会话分页和跨项目「对话」流都由服务端按「置顶优先、再按活跃时间倒序」分页，前端排序必须与之一致，否则翻页会错位 |
 | 运行结束记录 | 服务进程内存（有界，约百条） | `server/modules/diagnostics`：每个 run 为什么结束（见 [chat.md](./chat.md)）。刻意不入库——它服务于"刚刚出了什么事"，重启即弃；`GET /api/diagnostics/runs` 读出，前端诊断报告把它和浏览器侧证据合成一份文件 |
 | 前端构建产物 | `dist/`（vite build） | Express 静态托管 + SPA fallback |
 | 服务端构建产物 | `dist-server/` | `tsc + tsc-alias` 先产出 `dist-server.next`，`scripts/promote-dist-server.mjs` 原子晋升（保留 `dist-server.old`；`preserver` 钩子启动前自愈） |
@@ -95,6 +96,7 @@ docs/
 ## 认证与安全边界
 
 - **JWT**：`server/modules/auth/auth.middleware.ts`。密钥取 env `JWT_SECRET`，否则自动生成入库（`app_config.jwt_secret`）。token 7 天有效，半衰期自动刷新（响应头 `X-Refreshed-Token`）。WS 走 query string 或 Authorization 头鉴权（`websocket-auth.service.ts`）。
+- **执行 MCP**：`/mcp/execution` 在通用 `/api` 鉴权之外单独挂载，默认关闭。专用令牌、本机连接、Host 和代理头校验由 execution 模块负责；执行目录、记录及生命周期见 providers.md「本机执行 MCP」。
 - **可选 API key**：`validateApiKey` 作用于全部 `/api`；agent 模块另走 API key / 平台双模鉴权。
 - **上传白名单**：`chat.send` 的附件只放行 `~/.cloudcli/assets` 直接子文件，防止任意路径读。
 - **`file:` 链接白名单**：会话里引擎产出的本地文件链接走只读端点，目录白名单含各引擎数据根与系统临时目录（`server` 侧 fileLink 相关服务），防止越权读盘。

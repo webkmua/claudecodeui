@@ -313,6 +313,8 @@ export const api = {
     post(`/api/providers/sessions/${encodeURIComponent(sessionId)}/fork`, body),
   renameSession: (sessionId: string, summary: string) =>
     put(`/api/providers/sessions/${sessionId}`, { summary }),
+  pinSession: (sessionId: string, isPinned: boolean) =>
+    put(`/api/providers/sessions/${encodeURIComponent(sessionId)}/pin`, { isPinned }),
   // What one agent of a workflow run did, read from its transcript on demand
   // when its row in the workflow card is opened.
   workflowAgentActivity: (sessionId: string, runId: string, agentId: string) =>
@@ -574,6 +576,10 @@ export const api = {
     drafts: () => get('/api/user/drafts'),
     saveDraft: (scope: string, draft: { text: string; queuedMessage?: unknown }) =>
       put('/api/user/drafts', { scope, ...draft }),
+    appendQueuedMessage: (scope: string, queuedMessage: unknown) =>
+      post('/api/user/drafts/queued-message', { scope, queuedMessage }),
+    clearQueuedMessage: (scope: string, expectedQueuedMessage: unknown) =>
+      del('/api/user/drafts/queued-message', { scope, expectedQueuedMessage }),
     deleteDraft: (scope: string) => del('/api/user/drafts', { scope }),
   },
 

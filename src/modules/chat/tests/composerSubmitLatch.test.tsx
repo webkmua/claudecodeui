@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, test, vi } from 'vitest';
 
+import type * as Api from '@/shared/api';
 import type { ChatMessage, Project } from '@/shared/types';
 
 /**
@@ -18,7 +19,8 @@ import type { ChatMessage, Project } from '@/shared/types';
 
 const authenticatedFetch = vi.fn();
 
-vi.mock('@/shared/api', () => ({
+vi.mock('@/shared/api', async (importOriginal) => ({
+  ...(await importOriginal<typeof Api>()),
   authenticatedFetch: (...args: unknown[]) => authenticatedFetch(...args),
   api: {
     getFiles: () => Promise.resolve({ ok: false }),
