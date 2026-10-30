@@ -35,7 +35,6 @@ import {
     authRoutes,
     validateApiKey,
 } from './modules/auth/index.js';
-import { taskmasterRoutes } from './modules/taskmaster/index.js';
 import { commandsRoutes } from './modules/commands/index.js';
 import { settingsRoutes } from './modules/settings/index.js';
 import { createSystemModule } from './modules/system/index.js';
@@ -58,6 +57,7 @@ import {
     scheduledMessagesRoutes,
 } from './modules/scheduled-messages/index.js';
 import { assetsRoutes } from './modules/assets/index.js';
+import { mediaRoutes } from './modules/media/index.js';
 import { fileTreeRoutes } from './modules/file-tree/index.js';
 import { diagnosticsRoutes } from './modules/diagnostics/index.js';
 import { createLocalProxyRouter, localProxyAbsolutePathFallback } from './modules/local-proxy/index.js';
@@ -228,8 +228,12 @@ app.use('/api/tasks', taskBridgeRouter);
 // 本机执行使用显式配置的专用令牌，单独校验鉴权。
 app.use('/mcp/execution', createExecutionModule().router);
 
+// 图片票据只授权单个资源；签发入口仍受 API key 和登录检查保护。
+app.use('/api/media', mediaRoutes.images);
+
 // Optional API key validation (if configured)
 app.use('/api', validateApiKey);
+app.use('/api/media', mediaRoutes.signing);
 
 // Authentication routes (public)
 app.use('/api/auth', authRoutes);
@@ -251,9 +255,6 @@ app.use('/api/git', authenticateToken, gitRoutes);
 
 // Git worktree management (protected)
 app.use('/api/worktrees', authenticateToken, worktreesRoutes);
-
-// TaskMaster API Routes (protected)
-app.use('/api/taskmaster', authenticateToken, taskmasterRoutes);
 
 // Commands API Routes (protected)
 app.use('/api/commands', authenticateToken, commandsRoutes);

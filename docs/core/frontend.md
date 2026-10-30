@@ -1,6 +1,6 @@
 # 前端架构（Frontend）
 
-> 基准：2.11.0 / 2026-10-24
+> 基准：2.11.0 / 2026-10-24（i18n 节 2026-10-29 核对）
 > **核心文档**：改动 `src/shared/**` 或聊天渲染/性能相关代码时**必须同步更新本文**。
 > 普通 bug 修复不动架构的不需要更新（提交时走 `--no-verify`，见 `AGENTS.md`）。
 
@@ -32,7 +32,7 @@ React 18 + TypeScript + Vite 7（`vite.config.js`，别名 `@` → `src/`，`@sh
 
 活动项还带一个"在等引擎"的标志：常驻引擎把已提交的回合握在原生线程空闲之前，这段时间活动药丸显示"排队中——等引擎空闲"，按钮说明它取消的是排队中的消息，而不是停止正在跑的回合。这个标志既来自 `running-sessions` 的轮询，也来自引擎自己发的活动状态帧；两者都走同一份活动项，轮询不报它的时候保留上一次的值。"在汇报"（`reporting`，挂在后台条目上）走同一条路：后台工作结束后引擎自己起一轮汇报，药丸显示"正在汇报后台结果"，仍有后台工作时在旁边列出，没有时不显示任务数；运行时在会话还有工作时总是明确报出这个标志，汇报结束就报 false，否则保留上次值的规则会让它停在 true。
 
-前后端共用的 `NormalizedMessage` 是聊天时间线的 wire contract；provider 给出的跨路行身份和历史正文完整度必须由 WebSocket 与历史接口原样传入 `SessionTimelineStore`，不能在视图模型层重新生成。身份的分段与对账规则见 [chat.md](./chat.md)。本地 Markdown 图片经授权端点转换为 Blob URL 后，组件换图或卸载必须中止请求并恰好释放一次 URL。
+前后端共用的 `NormalizedMessage` 是聊天时间线的 wire contract；provider 给出的跨路行身份和历史正文完整度必须由 WebSocket 与历史接口原样传入 `SessionTimelineStore`，不能在视图模型层重新生成。身份的分段与对账规则见 [chat.md](./chat.md)。本地图片的签名申请与字节加载分离，机制见下文“图片直连与缓存”。
 
 `WebSocketContext` 只分发当前 socket 的回调，已被替换连接的迟到正文、打开和错误回调不能改变新连接。连接建立后，聊天接收器主动订阅已有会话，先通过确认建立网关代次，再让带代次的事件进入时间线。`SessionTimelineStore` 的连续应用游标与确认水位分开；有界缺口缓存、逐事件状态和指令执行、历史恢复基线见 [chat.md](./chat.md)。接收器不另建去重账。历史恢复失败提示使用 `chat.replay.recoveryFailed` 文案，简体、繁体和英文登记在各语言的 `chat.json`，其他语言沿现有英文回退。提示复用错误卡，不增加持久化消息；恢复成功后移除。
 
@@ -152,8 +152,9 @@ MCP 服务器表单按 `useProviderMcpCapabilities()` 渲染。首屏与请求�
 
 ## i18n
 
-- 目录 `src/modules/i18n/`：11 种语言 × 7 个命名空间（auth/chat/codeEditor/common/settings/sidebar/tasks）= 77 个 JSON。
-- 新增用户可见文案必须走 i18n key；**en / zh-CN / zh-TW 三份必须给全**，其余语言可暂缺（回退英文）——这是当前维护约定，翻译覆盖面以 `src/modules/i18n/locales/` 现状为准。
+- 目录 `src/modules/i18n/`：15 种语言目录，命名空间按文件存在（7 种：auth/chat/codeEditor/common/git/settings/sidebar），覆盖面以 `src/modules/i18n/locales/` 现状为准；语言清单在 `languages.ts`。
+- **翻译按语言懒加载**：`resources.ts` 用 `import.meta.glob` 动态引用全部 JSON，Vite 按 `vite.config.js` 的 `locale-<lang>` 规则切成每语言一个懒 chunk；启动只加载当前语言 + en（`initI18n`，在 `main.tsx` 首帧渲染前完成），切换语言走 `switchLanguage`（先载 bundle 再 `changeLanguage`），跨设备偏好同步同样走它。bundle 加载失败降级为显示 key，不阻塞启动。
+- 新增用户可见文案必须走 i18n key；**en / zh-CN / zh-TW 三份必须给全**，其余语言可暂缺（回退英文）——这是当前维护约定。
 
 ## PWA 与版本
 
@@ -173,7 +174,7 @@ MCP 服务器表单按 `useProviderMcpCapabilities()` 渲染。首屏与请求�
 
 ## 大结果附件
 
-`OutputAssets` 从结果里的受限资源地址提取图片和完整文本入口，重复地址只展示一次。入口默认折叠，展开前不挂载图片组件，因此浏览器不会为整段读图历史一次性拉取所有图片。图片复用 `ChatMessageImages` 和统一查看器；全文复用文件附件下载。图片引用即使落在旧的 `images.data` 字段，也走 assets API 的鉴权读取，不交给裸 `img` 请求。
+`OutputAssets` 从结果里的受限资源地址提取图片和完整文本入口，重复地址只展示一次。入口默认折叠，展开前不挂载图片组件，因此浏览器不会为整段读图历史一次性拉取所有图片。图片复用 `ChatMessageImages` 和统一查看器；全文复用文件附件下载。图片引用即使落在旧的 `images.data` 字段，也先申请签名 URL，再由浏览器直接加载。
 
 HTML、PDF 导出通过 assets API 顺序读取引用的资源并内嵌 data URL，附件用原生 `details` 与下载链接显示，不依赖 React 事件。JSON 导出保留消息并附资源映射。读取失败使导出明确失败，不生成缺少附件的文件。完整导出需要在浏览器汇总资源，因此不能用日常聊天读取的内存预算承诺导出峰值。
 
@@ -184,3 +185,16 @@ HTML、PDF 导出通过 assets API 顺序读取引用的资源并内嵌 data URL
 - **实时流式模式（Web Speech）与识别语言**：当浏览器支持 `webkitSpeechRecognition` / `SpeechRecognition` 时，可在设置中开启实时流式听写。启用 `interimResults: true` 与 `continuous: true`，随着用户讲话，识别中间结果实时显示在输入框中；分句提交后自动作为基底合并，支持连续听写。语音识别语言可通过设置或快捷设置抽屉随时切换，`resolveRecognitionLanguage` 统一规范化为目标 BCP-47 标签。
 - **服务端模式与 VAD**：录音通过 `VoiceActivityDetector` 挂载 `AnalyserNode`，检测用户发声与句末静音停顿（默认 1500ms），到期触发自动提交，无需手动点击停止。
 - 转录结果通过 `handleVoiceTranscript` 自然追加在输入框既有文本后。开启连续听写时，单句提交后自动续启下一句录音。
+## 图片直连与缓存
+
+`useSignedImage` 供聊天、Markdown 预览、文件树和编辑器图片预览共用。Hook 只保留签名 URL、有效期与错误，不保存图片字节；浏览器通过 `<img>` 加载和解码。视口附近的组件才申请，查看器立即申请；缺少 IntersectionObserver 时立即申请保证可用。相邻申请按接口上限分批，同一账号和引用共享进行中的申请与有效结果，已完成条目受容量限制。
+
+签名元数据不缓存，图片响应允许浏览器保存并以 ETag 再验证；普通鉴权 API 继续使用 `no-store`，图片响应不带令牌刷新头。签名即将过期时，新的读取和保存操作按需续签；已显示图片不定时更换地址。图片加载失败最多自动续签一次，错误不无限重试。换引用或卸载后的异步结果不能更新旧组件；账号切换、退出登录和会话失效会使缓存及旧请求结果失效。
+
+统一查看器保留浏览器加载方式，下载或分享时才按需读取 Blob。上传前本地预览、导出嵌入图片以及 PDF、音视频预览保留各自的 Blob 生命周期。图片 URL 不持久化；注销不能清除已下载的图片字节。
+
+全屏查看器与编辑器图片预览共用 `ImageViewerSurface` 的底部信息栏。分辨率来自浏览器解码后的 `naturalWidth`、`naturalHeight`，按图片源隔离，缩放不改变它。入口单独传入原始路径，信息栏不把临时签名地址当文件路径；复制复用公共剪贴板工具，路径保留手动选择能力。
+
+聊天正文的图片地址识别共用 `isImageReference`，仅判断明确图片扩展名及可用的地址形式，不读取文件；本地权限仍由图片签名入口校验。
+
+聊天 Markdown 的本地文件、目录链接由聊天模块私有的 `usePathExists` 挂载时经 file-tree 批量存在性接口探测（转录已虚拟化，挂载行即贴近视口）；明确不存在或不可读的判定渲染为不可点的普通文字，其余保持可点。探测只缓存成功结果，失败结果不缓存，账号切换使缓存失效。

@@ -1,4 +1,4 @@
-export { expireAuthSession, isAuthTokenExpired, TOKEN_EXPIRY_SKEW_MS } from '@/shared/authToken';
+import type { ImageMediaRequest, PathExistenceRequest } from '@/shared/types';
 import {
   expireAuthSession,
   getStoredAuthToken,
@@ -6,6 +6,8 @@ import {
 } from '@/shared/authToken';
 import { collectStoredOutputAssets, IS_PLATFORM } from '@/shared/utils';
 import { isValidCustomVoiceUrl, readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
+
+export { expireAuthSession, isAuthTokenExpired, TOKEN_EXPIRY_SKEW_MS } from '@/shared/authToken';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
 // defaults below can be merged with a caller's headers by spreading.
@@ -255,8 +257,6 @@ export const api = {
       `/api/projects/${encodeURIComponent(projectId)}/sessions${query({ limit, offset })}`,
       options,
     ),
-  projectTaskmaster: (projectId: string) =>
-    get(`/api/projects/${encodeURIComponent(projectId)}/taskmaster`),
   renameProject: (projectId: string, displayName: string) =>
     put(`/api/projects/${projectId}/rename`, { displayName }),
   restoreProject: (projectId: string) =>
@@ -542,23 +542,6 @@ export const api = {
       get(`/api/assets/images/${encodeURIComponent(filename)}`, options),
   },
 
-  // TaskMaster endpoints — all addressed by DB projectId post-migration.
-  taskmaster: {
-    // Update a task
-    updateTask: (projectId: string, taskId: string | number, updates: unknown) =>
-      put(`/api/taskmaster/update-task/${projectId}/${taskId}`, updates),
-
-    tasks: (projectId: string) => get(`/api/taskmaster/tasks/${encodeURIComponent(projectId)}`),
-    mcpStatus: () => get('/api/taskmaster/mcp-status'),
-    installationStatus: () => get('/api/taskmaster/installation-status'),
-
-    prdFiles: (projectId: string) => get(`/api/taskmaster/prd/${encodeURIComponent(projectId)}`),
-    prdFile: (projectId: string, fileName: string) =>
-      get(`/api/taskmaster/prd/${encodeURIComponent(projectId)}/${encodeURIComponent(fileName)}`),
-    savePrd: (projectId: string, { fileName, content }: { fileName: string; content: string }) =>
-      post(`/api/taskmaster/prd/${encodeURIComponent(projectId)}`, { fileName, content }),
-  },
-
   // User endpoints
   user: {
     gitConfig: () => get('/api/user/git-config'),
@@ -761,3 +744,11 @@ export const readExternalFileContent = (
     `/api/file-tree/external-file/content?path=${encodeURIComponent(filePath)}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ''}`,
     options,
   );
+
+/** 鉴权申请图片地址；返回 URL 后由浏览器直接加载图片字节。 */
+export const requestImageUrls = (images: ImageMediaRequest[], options: ApiRequestOptions = {}) =>
+  post('/api/media/image-urls', { images }, options);
+
+/** 鉴权批量探测本地路径是否可读；聊天渲染据此决定路径引用是否可点。 */
+export const requestPathsExist = (items: PathExistenceRequest[], options: ApiRequestOptions = {}) =>
+  post('/api/file-tree/paths/exists', { items }, options);
