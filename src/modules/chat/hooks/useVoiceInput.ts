@@ -82,13 +82,15 @@ export function useVoiceInput(
 
   const stop = useCallback((opts?: { send?: boolean; manual?: boolean }) => {
     cleanupVad();
-    if (opts?.manual ?? true) {
+    if (opts?.manual !== false) {
       manuallyStoppedRef.current = true;
     }
     const rec = recorderRef.current;
     if (rec && rec.state !== 'inactive') {
       sendRef.current = opts?.send ?? false;
       rec.stop();
+    } else if (opts?.manual !== false) {
+      setState('idle');
     }
   }, []);
 
@@ -185,8 +187,14 @@ export function useVoiceInput(
   }, [onTranscript, onError, options?.vadEnabled, options?.silenceTimeoutMs, options?.continuous, stop]);
 
   const toggle = useCallback(() => {
-    if (state === 'recording') stop({ manual: true });
-    else if (state === 'idle') start();
+    if (state === 'recording') {
+      stop({ manual: true });
+    } else if (state === 'transcribing') {
+      manuallyStoppedRef.current = true;
+      setState('idle');
+    } else if (state === 'idle') {
+      start();
+    }
   }, [state, start, stop]);
 
   return { state, toggle, stop, isSpeaking };

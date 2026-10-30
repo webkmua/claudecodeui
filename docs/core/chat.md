@@ -268,7 +268,8 @@ MCP 客户端连接断开不关闭会话。运行记录与查询游标由 execut
 ## 语音输入与静音自动提交（Voice Input & VAD）
 
 `ChatComposer` 集成 `useVoiceInput` 与 Web Audio `VoiceActivityDetector`：
-- 用户点击麦克风后录音。当开启 `voiceVadEnabled` 时，监听时域 RMS 与频域能量；
-- 当用户发声后并在停顿达到预设静音阈值（默认 1.5s），探测器触发 `onSilence` 自动结束录音并调用 `/api/voice/transcribe`；
-- 转录文本自然追加在输入框文本之后；
-- 支持连续模式（`voiceContinuousMode`），在转录完成后自动续接听写。手动点击停止或发送按钮可立即终止录音与续接。
+- 用户点击麦克风后录音。当开启 `voiceVadEnabled` 时，监听时域 RMS 与人声频段（200Hz~3500Hz）能量；
+- 探测器自动恢复 AudioContext 挂起状态，通过双帧发声确认滤除单次瞬态杂音（click/pop），在停顿达到预设静音阈值（默认 1.5s）触发 `onSilence` 自动结束录音并调用 `/api/voice/transcribe`；
+- 视觉指示带滞后消抖（hysteresis），平滑辅音短暂停顿；
+- 转录文本自然追加在输入框既有文本后；
+- 支持连续模式（`voiceContinuousMode`），在转录完成后自动续接听写。手动点击停止（录音或转录中）或发送按钮可立即终止录音与续接。

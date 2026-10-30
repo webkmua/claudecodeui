@@ -3,6 +3,7 @@ import { describe, it } from 'vitest';
 
 import {
   calculateRms,
+  calculateVoiceBandEnergy,
   calculateFrequencyEnergy,
   evaluateVadFrame,
   DEFAULT_VAD_CONFIG,
@@ -22,7 +23,6 @@ describe('voiceActivityDetector', () => {
 
     it('returns 1.0 for maximum square wave amplitude (0 and 255)', () => {
       const maxWave = new Uint8Array([0, 255, 0, 255]);
-      // (128/128)^2 = 1, (127/128)^2 ~ 0.984 -> rms close to 1
       const rms = calculateRms(maxWave);
       assert.ok(rms > 0.98 && rms <= 1.0);
     });
@@ -31,6 +31,20 @@ describe('voiceActivityDetector', () => {
       const lowNoise = new Uint8Array([127, 129, 128, 127]);
       const rms = calculateRms(lowNoise);
       assert.ok(rms > 0 && rms < 0.01);
+    });
+  });
+
+  describe('calculateVoiceBandEnergy', () => {
+    it('returns 0 for empty buffer', () => {
+      assert.equal(calculateVoiceBandEnergy(new Uint8Array(0)), 0);
+    });
+
+    it('averages only bins within the specified voice band range', () => {
+      // 10 bins total
+      const bins = new Uint8Array([0, 10, 50, 70, 90, 20, 10, 5, 0, 0]);
+      // Average of bins 2 to 5: (50 + 70 + 90) / 3 = 70
+      const energy = calculateVoiceBandEnergy(bins, 2, 5);
+      assert.equal(energy, 70);
     });
   });
 
@@ -48,7 +62,7 @@ describe('voiceActivityDetector', () => {
   describe('evaluateVadFrame', () => {
     const config = {
       silenceTimeoutMs: 1500,
-      minSpeechDurationMs: 300,
+      minSpeechDurationMs: 200,
       maxDurationMs: 60000,
       speechThreshold: 0.02,
     };
@@ -58,6 +72,7 @@ describe('voiceActivityDetector', () => {
       firstSpeechTime: 0,
       lastSpeechTime: 0,
       startTime: t0,
+      speechFramesCount: 0,
     });
 
     it('stays waiting during initial silence without committing', () => {
@@ -67,28 +82,52 @@ describe('voiceActivityDetector', () => {
       assert.equal(res.nextState.hasSpoken, false);
     });
 
-    it('marks speech when active audio frame is received', () => {
+    it('confirms speech after consecutive active audio frames', () => {
       const s0 = createInitialState(1000);
-      const res = evaluateVadFrame(s0, true, 2000, config);
-      assert.equal(res.shouldCommit, false);
-      assert.equal(res.nextState.hasSpoken, true);
-      assert.equal(res.nextState.firstSpeechTime, 2000);
-      assert.equal(res.nextState.lastSpeechTime, 2000);
+      const s1 = evaluateVadFrame(s0, true, 2000, config).nextState;
+      assert.equal(s1.hasSpoken, false); // First frame is candidate onset
+      assert.equal(s1.speechFramesCount, 1);
+
+      const res2 = evaluateVadFrame(s1, true, 2060, config);
+      assert.equal(res2.shouldCommit, false);
+      assert.equal(res2.nextState.hasSpoken, true); // Second frame confirms speech
+      assert.equal(res2.nextState.firstSpeechTime, 2000);
+      assert.equal(res2.nextState.lastSpeechTime, 2060);
     });
 
-    it('does not commit on brief click or transient noise under minSpeechDurationMs', () => {
+    it('rejects solitary transient pop (1 frame) without locking into speech', () => {
       const s0 = createInitialState(1000);
-      // Brief pop at 2000ms (duration 50ms)
+      // Single transient spike at 2000ms
       const s1 = evaluateVadFrame(s0, true, 2000, config).nextState;
-      const s2 = evaluateVadFrame(s1, true, 2050, config).nextState;
-      // Followed by silence at 2500ms
-      const res = evaluateVadFrame(s2, false, 2500, config);
-      assert.equal(res.shouldCommit, false);
+      assert.equal(s1.hasSpoken, false);
+
+      // Followed by silence past minSpeechDurationMs
+      const resSilence = evaluateVadFrame(s1, false, 2250, config);
+      assert.equal(resSilence.shouldCommit, false);
+      assert.equal(resSilence.nextState.hasSpoken, false);
+      assert.equal(resSilence.nextState.speechFramesCount, 0);
+    });
+
+    it('commits short one-syllable word ("Yes", "Hi", 120ms) after silence timeout', () => {
+      const s0 = createInitialState(1000);
+      // User says "Hi": 2 frames at 2000ms and 2060ms
+      const s1 = evaluateVadFrame(s0, true, 2000, config).nextState;
+      const s2 = evaluateVadFrame(s1, true, 2060, config).nextState;
+      assert.equal(s2.hasSpoken, true);
+
+      // Silence at 2500ms (440ms silence < 1500ms timeout) -> not committed
+      const s3 = evaluateVadFrame(s2, false, 2500, config).nextState;
+      assert.equal(s3.hasSpoken, true);
+
+      // At 3560ms (1500ms after last speech at 2060ms) -> commits cleanly!
+      const resCommit = evaluateVadFrame(s3, false, 3560, config);
+      assert.equal(resCommit.shouldCommit, true);
+      assert.equal(resCommit.reason, 'silence');
     });
 
     it('commits after genuine speech followed by silenceTimeoutMs', () => {
       const s0 = createInitialState(1000);
-      // User speaks from 2000ms to 3000ms (1000ms speech > 300ms minSpeech)
+      // User speaks from 2000ms to 3000ms
       const s1 = evaluateVadFrame(s0, true, 2000, config).nextState;
       const s2 = evaluateVadFrame(s1, true, 3000, config).nextState;
 
