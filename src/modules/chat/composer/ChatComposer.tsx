@@ -132,7 +132,9 @@ type ChatComposerProps = {
   renderInputWithMentions: (text: string) => ReactNode;
   textareaRef: RefObject<HTMLTextAreaElement>;
   input: string;
-  onVoiceTranscript?: (text: string, send?: boolean) => void;
+  onVoiceTranscript?: (text: string, send?: boolean, isInterim?: boolean) => void;
+  onVoiceStart?: () => void;
+  onVoiceEnd?: () => void;
   onInputChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
   onTextareaClick: (event: MouseEvent<HTMLTextAreaElement>) => void;
   onTextareaKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
@@ -225,6 +227,8 @@ function ChatComposer({
   textareaRef,
   input,
   onVoiceTranscript,
+  onVoiceStart,
+  onVoiceEnd,
   onInputChange,
   onTextareaClick,
   onTextareaKeyDown,
@@ -242,7 +246,7 @@ function ChatComposer({
   isReplyInFlight = false,
   onForceSendQueuedDraft,
 }: ChatComposerProps) {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   const fileDropdownRef = useRef<HTMLDivElement | null>(null);
   const selectedFileRef = useRef<HTMLDivElement | null>(null);
   const commandMenuPosition = useMemo(() => {
@@ -302,6 +306,10 @@ function ChatComposer({
     {
       vadEnabled: preferences.voiceVadEnabled,
       continuous: preferences.voiceContinuousMode,
+      webSpeechStreaming: preferences.voiceWebSpeechStreaming,
+      lang: i18n.language,
+      onStart: onVoiceStart,
+      onEnd: onVoiceEnd,
     },
   );
   const isRecording = voiceState === 'recording';

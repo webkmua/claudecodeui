@@ -265,11 +265,12 @@ execution 模块复用聊天运行登记和应用会话映射，外部派发的�
 执行模块等待引擎回合结束与后台工作收尾后，才向 `chatRunRegistry` 发送最终 complete；
 MCP 客户端连接断开不关闭会话。运行记录与查询游标由 execution 模块保存，规则见 providers.md「本机执行 MCP」。
 
-## 语音输入与静音自动提交（Voice Input & VAD）
+## 语音输入、实时流式识别与客户端 VAD（Voice Input & Streaming STT）
 
-`ChatComposer` 集成 `useVoiceInput` 与 Web Audio `VoiceActivityDetector`：
-- 用户点击麦克风后录音。当开启 `voiceVadEnabled` 时，监听时域 RMS 与人声频段（200Hz~3500Hz）能量；
+`ChatComposer` 集成 `useVoiceInput`，支持服务端模型（Parakeet TDT / Whisper）与浏览器原生 Web Speech API：
+- **实时流式识别（`voiceWebSpeechStreaming`）**：在支持 Web Speech API（`SpeechRecognition` / `webkitSpeechRecognition`）的浏览器中，可开启实时流式听写。启用 `continuous: true` 与 `interimResults: true`，话音未落时词句即实时渲染于输入框中；分句 final 结果自动提交至文本缓冲区，并在跨句续接时平滑追加。
+- **服务端 VAD 录音**：当使用服务端 STT 时，点击麦克风录音。开启 `voiceVadEnabled` 时，监听时域 RMS 与人声频段（200Hz~3500Hz）能量；
 - 探测器自动恢复 AudioContext 挂起状态，通过双帧发声确认滤除单次瞬态杂音（click/pop），在停顿达到预设静音阈值（默认 1.5s）触发 `onSilence` 自动结束录音并调用 `/api/voice/transcribe`；
 - 视觉指示带滞后消抖（hysteresis），平滑辅音短暂停顿；
 - 转录文本自然追加在输入框既有文本后；
-- 支持连续模式（`voiceContinuousMode`），在转录完成后自动续接听写。手动点击停止（录音或转录中）或发送按钮可立即终止录音与续接。
+- 支持连续模式（`voiceContinuousMode`），在转录或每句结束后自动续接听写。手动点击停止（录音或转录中）或发送按钮可立即终止录音并完成发送。

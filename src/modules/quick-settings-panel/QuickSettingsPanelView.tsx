@@ -67,12 +67,14 @@ function QuickSettingsPanelView({ selectedProject, onInsertCommand }: QuickSetti
     sendByCtrlEnter: preferences.sendByCtrlEnter,
     voiceEnabled: preferences.voiceEnabled,
     voiceVadEnabled: preferences.voiceVadEnabled,
+    voiceWebSpeechStreaming: preferences.voiceWebSpeechStreaming,
   }), [
     preferences.sendByCtrlEnter,
     preferences.showRawParameters,
     preferences.showThinking,
     preferences.voiceEnabled,
     preferences.voiceVadEnabled,
+    preferences.voiceWebSpeechStreaming,
   ]);
 
   const handlePreferenceChange = useCallback(

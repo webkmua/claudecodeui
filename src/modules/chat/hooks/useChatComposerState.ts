@@ -1256,12 +1256,32 @@ export function useChatComposerState({
   // A voice transcript either fills the input (to edit before sending) or, when the
   // user tapped "stop and send", is submitted straight away. updateInput mirrors
   // the value into inputValueRef synchronously so handleSubmit reads the new text.
-  const handleVoiceTranscript = useCallback((text: string, send?: boolean) => {
-    const base = inputValueRef.current.trim();
-    const next = base ? `${base} ${text}` : text;
-    updateInput(next);
-    if (send) handleSubmitRef.current?.(createFakeSubmitEvent());
-  }, [updateInput]);
+  // For live streaming speech recognition, interim and final chunks stream live into
+  // the input relative to the base text snapshot taken when speech started.
+  const voiceBaseRef = useRef<string | null>(null);
+
+  const handleVoiceStart = useCallback(() => {
+    voiceBaseRef.current = inputValueRef.current.trim();
+  }, []);
+
+  const handleVoiceEnd = useCallback(() => {
+    voiceBaseRef.current = null;
+  }, []);
+
+  const handleVoiceTranscript = useCallback(
+    (text: string, send?: boolean, isInterim?: boolean) => {
+      const base = voiceBaseRef.current ?? inputValueRef.current.trim();
+      const next = base ? `${base} ${text}` : text;
+      updateInput(next);
+      if (send) {
+        voiceBaseRef.current = null;
+        handleSubmitRef.current?.(createFakeSubmitEvent());
+      } else if (!isInterim && voiceBaseRef.current === null) {
+        voiceBaseRef.current = next;
+      }
+    },
+    [updateInput],
+  );
 
   useEffect(() => {
     inputValueRef.current = input;
@@ -1563,6 +1583,8 @@ export function useChatComposerState({
     backgroundTasks,
     hasActiveBackgroundTasks,
     handleVoiceTranscript,
+    handleVoiceStart,
+    handleVoiceEnd,
     handleInputChange,
     handleKeyDown,
     handlePaste,

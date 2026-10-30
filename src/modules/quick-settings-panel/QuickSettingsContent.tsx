@@ -5,6 +5,7 @@ import {
   Languages,
   Mic,
   Moon,
+  Radio,
   Sun,
   type LucideIcon,
 } from 'lucide-react';
@@ -16,6 +17,7 @@ import { SETTING_ROW_CLASS } from '@/shared/constants';
 import type { PreferenceToggleKey, QuickSettingsPreferences } from '@/shared/types';
 import QuickSettingsSection from '@/modules/quick-settings-panel/QuickSettingsSection';
 import QuickSettingsToggleRow from '@/modules/quick-settings-panel/QuickSettingsToggleRow';
+import { isWebSpeechSupported } from '@/shared/webSpeechRecognition';
 
 /** Declarative description of one quick settings toggle row - its preference key, translation key and icon - so the rows can be rendered from a list instead of hand-written. */
 type PreferenceToggleItem = {
@@ -53,6 +55,11 @@ const INPUT_SETTING_TOGGLES: PreferenceToggleItem[] = [
     labelKey: 'quickSettings.voiceVadEnabled',
     icon: AudioWaveform,
   },
+  {
+    key: 'voiceWebSpeechStreaming',
+    labelKey: 'quickSettings.voiceWebSpeechStreaming',
+    icon: Radio,
+  },
 ];
 
 type QuickSettingsContentProps = {
@@ -68,9 +75,13 @@ export default function QuickSettingsContent({
   onPreferenceChange,
 }: QuickSettingsContentProps) {
   const { t } = useTranslation('settings');
-  const inputSettingToggles = preferences.voiceEnabled
-    ? INPUT_SETTING_TOGGLES
-    : INPUT_SETTING_TOGGLES.filter(({ key }) => key !== 'voiceEnabled' && key !== 'voiceVadEnabled');
+  const webSpeechSupported = isWebSpeechSupported();
+  const inputSettingToggles = INPUT_SETTING_TOGGLES.filter(({ key }) => {
+    if (key === 'voiceEnabled') return true;
+    if (key === 'voiceVadEnabled') return preferences.voiceEnabled;
+    if (key === 'voiceWebSpeechStreaming') return preferences.voiceEnabled && webSpeechSupported;
+    return true;
+  });
 
   const renderToggleRows = (items: PreferenceToggleItem[]) => (
     items.map(({ key, labelKey, icon }) => (

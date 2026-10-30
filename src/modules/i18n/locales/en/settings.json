@@ -67,7 +67,10 @@
     "vad": "Silence auto-commit (VAD)",
     "vadDescription": "Automatically stop recording and transcribe when you pause speaking.",
     "continuous": "Continuous dictation",
-    "continuousDescription": "Keep listening for the next phrase after each transcription finishes."
+    "continuousDescription": "Keep listening for the next phrase after each transcription finishes.",
+    "webSpeechStreaming": "Live streaming recognition (Web Speech)",
+    "webSpeechStreamingDescription": "Words appear in the input live in real time as you speak. Uses browser speech recognition.",
+    "streamingActiveNote": "Live Web Speech streaming is active. Audio is transcribed directly in your browser without uploading recordings to the server."
   },
   "quickSettings": {
     "title": "Quick Settings",
@@ -82,6 +85,7 @@
     "sendByCtrlEnter": "Send by Ctrl+Enter",
     "voiceEnabled": "Voice (mic + read aloud)",
     "voiceVadEnabled": "Silence auto-commit (VAD)",
+    "voiceWebSpeechStreaming": "Live recognition (Web Speech)",
     "sendByCtrlEnterDescription": "When enabled, pressing Ctrl+Enter will send the message instead of just Enter. This is useful for IME users to avoid accidental sends.",
     "dragHandle": {
       "dragging": "Dragging handle",

@@ -139,6 +139,7 @@
             "src/shared/mcpCapabilitiesFallback.ts",
           "src/shared/authToken.ts",
           "src/shared/voiceConfig.ts",
+          "src/shared/webSpeechRecognition.ts",
           "src/shared/codeEditorSettings.ts",
           "src/shared/userSettings.ts",
           "src/shared/chatDrafts.ts",

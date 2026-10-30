@@ -5,6 +5,7 @@ import SettingsSection from '@/modules/settings/SettingsSection';
 import SettingsToggle from '@/modules/settings/SettingsToggle';
 import { useUiPreferences, useSetUiPreference } from '@/shared/context/UiPreferencesContext';
 import { useVoiceConfig } from '@/modules/settings/hooks/useVoiceConfig';
+import { isWebSpeechSupported } from '@/shared/webSpeechRecognition';
 
 const inputClass =
   'w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring';
@@ -25,6 +26,7 @@ export default function VoiceSettingsTab() {
   const setPreference = useSetUiPreference();
   const { config, update } = useVoiceConfig();
   const voiceEnabled = preferences.voiceEnabled;
+  const webSpeechSupported = isWebSpeechSupported();
 
   return (
     <div className="space-y-8">
@@ -44,6 +46,26 @@ export default function VoiceSettingsTab() {
 
           {voiceEnabled && (
             <>
+              {webSpeechSupported && (
+                <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                  <div className="pr-3">
+                    <div className="text-sm font-medium text-foreground">
+                      {t('voiceSettings.webSpeechStreaming', { defaultValue: 'Live browser streaming (Web Speech)' })}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {t('voiceSettings.webSpeechStreamingDescription', {
+                        defaultValue: 'Stream speech into the input live in real time as you speak.',
+                      })}
+                    </div>
+                  </div>
+                  <SettingsToggle
+                    checked={preferences.voiceWebSpeechStreaming}
+                    onChange={(v) => setPreference('voiceWebSpeechStreaming', v)}
+                    ariaLabel={t('voiceSettings.webSpeechStreaming', { defaultValue: 'Live browser streaming (Web Speech)' })}
+                  />
+                </div>
+              )}
+
               <div className="flex items-center justify-between rounded-lg border border-border p-3">
                 <div className="pr-3">
                   <div className="text-sm font-medium text-foreground">{t('voiceSettings.vad', { defaultValue: 'Silence auto-commit (VAD)' })}</div>
@@ -78,6 +100,14 @@ export default function VoiceSettingsTab() {
 
       {voiceEnabled && (
         <SettingsSection title={t('voiceSettings.backendTitle')} description={t('voiceSettings.backendDescription')}>
+          {preferences.voiceWebSpeechStreaming && (
+            <div className="mb-4 rounded-md border border-primary/20 bg-primary/5 p-3 text-xs text-muted-foreground">
+              {t('voiceSettings.streamingActiveNote', {
+                defaultValue:
+                  'Live Web Speech streaming is active. Audio is transcribed directly in your browser without uploading recordings to the server.',
+              })}
+            </div>
+          )}
           <form className="space-y-4" autoComplete="off" onSubmit={(e) => e.preventDefault()}>
             {/* Fake inputs to trap Chrome aggressive credentials autofill */}
             <input

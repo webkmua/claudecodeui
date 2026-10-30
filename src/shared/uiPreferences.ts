@@ -21,6 +21,8 @@ export type UiPreferences = {
   voiceVadEnabled: boolean;
   /** Continuously listens for voice phrases without requiring manual re-triggering. */
   voiceContinuousMode: boolean;
+  /** Uses browser Web Speech API for real-time live streaming dictation instead of server STT. */
+  voiceWebSpeechStreaming: boolean;
   /** Hides the workspace terminal tab entry while keeping the terminal itself functional. */
   showTerminalTab: boolean;
   /** Hides the workspace quick settings drawer and its draggable edge handle. */
@@ -42,6 +44,7 @@ const DEFAULTS: UiPreferences = {
   voiceEnabled: false,
   voiceVadEnabled: false,
   voiceContinuousMode: false,
+  voiceWebSpeechStreaming: false,
   showTerminalTab: true,
   showQuickSettingsPanel: true,
 };

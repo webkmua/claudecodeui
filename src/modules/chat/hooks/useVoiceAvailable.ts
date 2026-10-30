@@ -3,9 +3,10 @@ import { useEffect, useState } from 'react';
 import { api } from '@/shared/api';
 import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import { isValidCustomVoiceUrl, readVoiceConfig, VOICE_CONFIG_SYNC_EVENT } from '@/shared/voiceConfig';
+import { isWebSpeechSupported } from '@/shared/webSpeechRecognition';
 
 // Voice UI is gated on the `voiceEnabled` UI preference (toggled in Quick Settings /
-// the Settings modal) and a configured voice backend.
+// the Settings modal) and a configured voice backend or browser Web Speech API.
 let healthRequest: Promise<boolean> | null = null;
 
 function checkVoiceHealth(): Promise<boolean> {
@@ -27,7 +28,7 @@ export function useVoiceAvailable(): boolean {
   // Read through the shared preferences owner. This used to re-parse the
   // preferences blob and register its own storage + sync listeners, once per
   // assistant message row.
-  const { voiceEnabled: enabled } = useUiPreferences();
+  const { voiceEnabled: enabled, voiceWebSpeechStreaming } = useUiPreferences();
   const [available, setAvailable] = useState(false);
 
   useEffect(() => {
@@ -39,6 +40,11 @@ export function useVoiceAvailable(): boolean {
         setAvailable(false);
         return;
       }
+      // If Web Speech streaming is active and supported, voice input is available immediately.
+      if (voiceWebSpeechStreaming && isWebSpeechSupported()) {
+        setAvailable(true);
+        return;
+      }
       if (isValidCustomVoiceUrl(readVoiceConfig().baseUrl)) {
         setAvailable(true);
         return;
@@ -48,7 +54,8 @@ export function useVoiceAvailable(): boolean {
         const result = await checkVoiceHealth();
         if (active && id === requestId) setAvailable(result);
       } catch {
-        if (active && id === requestId) setAvailable(false);
+        // Fallback: if server check fails but Web Speech is supported, allow voice
+        if (active && id === requestId) setAvailable(isWebSpeechSupported());
       }
     };
 
@@ -58,7 +65,7 @@ export function useVoiceAvailable(): boolean {
       active = false;
       window.removeEventListener(VOICE_CONFIG_SYNC_EVENT, check);
     };
-  }, [enabled]);
+  }, [enabled, voiceWebSpeechStreaming]);
 
   return enabled && available;
 }

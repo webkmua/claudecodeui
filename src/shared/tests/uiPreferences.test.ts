@@ -40,6 +40,7 @@ test('a fresh install gets the documented defaults', () => {
     voiceEnabled: false,
     voiceVadEnabled: false,
     voiceContinuousMode: false,
+    voiceWebSpeechStreaming: false,
     showTerminalTab: true,
     showQuickSettingsPanel: true,
   });
@@ -133,3 +134,13 @@ test('voiceVadEnabled and voiceContinuousMode can be read and updated via reduce
   assert.equal(updated.voiceVadEnabled, false);
   assert.equal(updated.voiceContinuousMode, true);
 });
+
+test('voiceWebSpeechStreaming can be read and updated via reducer', () => {
+  storeUiPreferences({ voiceWebSpeechStreaming: 'true' });
+  const state = readStoredUiPreferences();
+  assert.equal(state.voiceWebSpeechStreaming, true);
+
+  const updated = uiPreferencesReducer(state, { type: 'set', key: 'voiceWebSpeechStreaming', value: false });
+  assert.equal(updated.voiceWebSpeechStreaming, false);
+});
+
