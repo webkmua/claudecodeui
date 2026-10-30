@@ -17,6 +17,10 @@ export type UiPreferences = {
   /** Allows multiple project groups and restores their browser-local expansion. */
   keepProjectsExpanded: boolean;
   voiceEnabled: boolean;
+  /** Automatically commits voice input when silence is detected after speaking. */
+  voiceVadEnabled: boolean;
+  /** Continuously listens for voice phrases without requiring manual re-triggering. */
+  voiceContinuousMode: boolean;
   /** Hides the workspace terminal tab entry while keeping the terminal itself functional. */
   showTerminalTab: boolean;
   /** Hides the workspace quick settings drawer and its draggable edge handle. */
@@ -36,6 +40,8 @@ const DEFAULTS: UiPreferences = {
   sidebarVisible: true,
   keepProjectsExpanded: false,
   voiceEnabled: false,
+  voiceVadEnabled: false,
+  voiceContinuousMode: false,
   showTerminalTab: true,
   showQuickSettingsPanel: true,
 };

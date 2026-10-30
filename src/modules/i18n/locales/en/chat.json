@@ -151,7 +151,9 @@
     "transcribing": "Transcribing…",
     "speak": "Read aloud",
     "stopSpeaking": "Stop",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "vadListening": "Listening… (pause to finish)",
+    "vadWaiting": "Listening… (auto-stops on silence)"
   },
   "input": {
     "placeholder": "Type / for commands, @ for files, or ask {{provider}} anything...",

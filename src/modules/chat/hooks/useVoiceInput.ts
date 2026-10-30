@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { transcribeVoice } from '@/shared/api';
 import type { VoiceInputState } from '@/shared/types';
+import { VoiceActivityDetector } from '@/modules/chat/utils/voiceActivityDetector';
 
 // Mobile-safe recording: iOS Safari 18.4+ supports webm/opus; older iOS needs mp4.
 const MIME_CANDIDATES = [
@@ -23,26 +24,45 @@ function pickMime(): string {
   return '';
 }
 
+export type UseVoiceInputOptions = {
+  /** Enables client-side Voice Activity Detection to auto-commit on silence */
+  vadEnabled?: boolean;
+  /** Silence duration in ms before auto-committing. Default: 1500 */
+  silenceTimeoutMs?: number;
+  /** Continuous listening: automatically starts listening for the next phrase after transcription finishes. */
+  continuous?: boolean;
+};
 
 /**
- * Push-to-talk dictation. Records the mic, uploads to /api/voice/transcribe
- * (an OpenAI-compatible speech-to-text backend via the Express proxy), and
- * returns the transcript through onTranscript.
+ * Dictation hook. Supports both manual push-to-talk and client-side Voice Activity
+ * Detection (VAD) with silence auto-commit. Records the mic, uploads to
+ * /api/voice/transcribe, and returns the transcript through onTranscript.
  */
 export function useVoiceInput(
   onTranscript: (text: string, send?: boolean) => void,
   onError?: (msg: string) => void,
+  options?: UseVoiceInputOptions,
 ) {
   const [state, setState] = useState<VoiceInputState>('idle');
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
+  const vadRef = useRef<VoiceActivityDetector | null>(null);
   const cancelledRef = useRef(false);
   const startingRef = useRef(false);
+  const manuallyStoppedRef = useRef(false);
   // Whether the in-progress stop should auto-send the transcript (vs just fill the box).
   const sendRef = useRef(false);
 
+  const cleanupVad = () => {
+    vadRef.current?.destroy();
+    vadRef.current = null;
+    setIsSpeaking(false);
+  };
+
   const stopTracks = () => {
+    cleanupVad();
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
   };
@@ -53,15 +73,29 @@ export function useVoiceInput(
     return () => {
       cancelledRef.current = true;
       startingRef.current = false;
+      cleanupVad();
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       recorderRef.current = null;
     };
   }, []);
 
+  const stop = useCallback((opts?: { send?: boolean; manual?: boolean }) => {
+    cleanupVad();
+    if (opts?.manual ?? true) {
+      manuallyStoppedRef.current = true;
+    }
+    const rec = recorderRef.current;
+    if (rec && rec.state !== 'inactive') {
+      sendRef.current = opts?.send ?? false;
+      rec.stop();
+    }
+  }, []);
+
   const start = useCallback(async () => {
     if (startingRef.current || (recorderRef.current && recorderRef.current.state !== 'inactive')) return;
     startingRef.current = true;
+    manuallyStoppedRef.current = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true },
@@ -108,12 +142,33 @@ export function useVoiceInput(
             onError?.(`Transcription failed: ${e instanceof Error ? e.message : String(e)}`);
           }
         } finally {
-          if (!cancelledRef.current) setState('idle');
+          if (!cancelledRef.current) {
+            if (options?.continuous && !shouldSend && !manuallyStoppedRef.current) {
+              void start();
+            } else {
+              setState('idle');
+            }
+          }
         }
       };
 
       rec.start();
       setState('recording');
+
+      if (options?.vadEnabled) {
+        vadRef.current = new VoiceActivityDetector(stream, {
+          silenceTimeoutMs: options.silenceTimeoutMs,
+          onSilence: () => {
+            stop({ send: false, manual: false });
+          },
+          onSpeechStart: () => {
+            setIsSpeaking(true);
+          },
+          onSpeechEnd: () => {
+            setIsSpeaking(false);
+          },
+        });
+      }
     } catch (e) {
       recorderRef.current = null;
       stopTracks();
@@ -127,23 +182,12 @@ export function useVoiceInput(
     } finally {
       startingRef.current = false;
     }
-  }, [onTranscript, onError]);
-
-  // Stop recording. Pass { send: true } to auto-send the transcript once it's ready.
-  // Guard on the recorder's own state (not React state) so a double tap, or the mic
-  // and Send buttons both firing, can't call stop() on an already-inactive recorder.
-  const stop = useCallback((opts?: { send?: boolean }) => {
-    const rec = recorderRef.current;
-    if (rec && rec.state !== 'inactive') {
-      sendRef.current = opts?.send ?? false;
-      rec.stop();
-    }
-  }, []);
+  }, [onTranscript, onError, options?.vadEnabled, options?.silenceTimeoutMs, options?.continuous, stop]);
 
   const toggle = useCallback(() => {
-    if (state === 'recording') stop();
+    if (state === 'recording') stop({ manual: true });
     else if (state === 'idle') start();
   }, [state, start, stop]);
 
-  return { state, toggle, stop };
+  return { state, toggle, stop, isSpeaking };
 }

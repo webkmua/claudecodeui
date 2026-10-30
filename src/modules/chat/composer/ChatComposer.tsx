@@ -14,6 +14,7 @@ import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIc
 
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
+import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
 import type { QueuedDraft } from '@/modules/chat/hooks/useChatComposerState';
 import type { LLMProvider, SessionActivity, ScheduledMessage } from '@/shared/types';
 import type { PendingPermissionRequest, PermissionMode } from '@/shared/types';
@@ -277,6 +278,7 @@ function ChatComposer({
 
   // Voice state is hosted here (not in the mic button) so the main Send button can stop
   // recording and send the transcript in one tap, the way the mic button drops it in the box.
+  const preferences = useUiPreferences();
   const voiceAvailable = useVoiceAvailable();
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const voiceErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -289,9 +291,18 @@ function ChatComposer({
     if (voiceErrorTimer.current) clearTimeout(voiceErrorTimer.current);
   }, []);
   const noopTranscript = useCallback(() => {}, []);
-  const { state: voiceState, toggle: voiceToggle, stop: voiceStop } = useVoiceInput(
+  const {
+    state: voiceState,
+    toggle: voiceToggle,
+    stop: voiceStop,
+    isSpeaking: voiceIsSpeaking,
+  } = useVoiceInput(
     onVoiceTranscript ?? noopTranscript,
     handleVoiceError,
+    {
+      vadEnabled: preferences.voiceVadEnabled,
+      continuous: preferences.voiceContinuousMode,
+    },
   );
   const isRecording = voiceState === 'recording';
   const isTranscribing = voiceState === 'transcribing';
@@ -525,7 +536,13 @@ function ChatComposer({
             </PromptInputButton>
 
             {onVoiceTranscript && voiceAvailable && (
-              <VoiceInputButton state={voiceState} onToggle={voiceToggle} errorMsg={voiceError} />
+              <VoiceInputButton
+                state={voiceState}
+                onToggle={voiceToggle}
+                errorMsg={voiceError}
+                isSpeaking={voiceIsSpeaking}
+                vadEnabled={preferences.voiceVadEnabled}
+              />
             )}
 
             <TokenUsageSummary usage={tokenBudget} onClick={onShowTokenUsage} />

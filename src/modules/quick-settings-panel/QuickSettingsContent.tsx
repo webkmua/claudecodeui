@@ -1,4 +1,5 @@
 import {
+  AudioWaveform,
   Brain,
   Eye,
   Languages,
@@ -47,6 +48,11 @@ const INPUT_SETTING_TOGGLES: PreferenceToggleItem[] = [
     labelKey: 'quickSettings.voiceEnabled',
     icon: Mic,
   },
+  {
+    key: 'voiceVadEnabled',
+    labelKey: 'quickSettings.voiceVadEnabled',
+    icon: AudioWaveform,
+  },
 ];
 
 type QuickSettingsContentProps = {
@@ -64,7 +70,7 @@ export default function QuickSettingsContent({
   const { t } = useTranslation('settings');
   const inputSettingToggles = preferences.voiceEnabled
     ? INPUT_SETTING_TOGGLES
-    : INPUT_SETTING_TOGGLES.filter(({ key }) => key !== 'voiceEnabled');
+    : INPUT_SETTING_TOGGLES.filter(({ key }) => key !== 'voiceEnabled' && key !== 'voiceVadEnabled');
 
   const renderToggleRows = (items: PreferenceToggleItem[]) => (
     items.map(({ key, labelKey, icon }) => (

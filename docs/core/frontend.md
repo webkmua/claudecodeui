@@ -176,3 +176,10 @@ MCP 服务器表单按 `useProviderMcpCapabilities()` 渲染。首屏与请求�
 `OutputAssets` 从结果里的受限资源地址提取图片和完整文本入口，重复地址只展示一次。入口默认折叠，展开前不挂载图片组件，因此浏览器不会为整段读图历史一次性拉取所有图片。图片复用 `ChatMessageImages` 和统一查看器；全文复用文件附件下载。图片引用即使落在旧的 `images.data` 字段，也走 assets API 的鉴权读取，不交给裸 `img` 请求。
 
 HTML、PDF 导出通过 assets API 顺序读取引用的资源并内嵌 data URL，附件用原生 `details` 与下载链接显示，不依赖 React 事件。JSON 导出保留消息并附资源映射。读取失败使导出明确失败，不生成缺少附件的文件。完整导出需要在浏览器汇总资源，因此不能用日常聊天读取的内存预算承诺导出峰值。
+
+## 语音输入与客户端 VAD
+
+输入区支持 Push-to-Talk 录音与客户端语音活动检测（VAD，静音自动提交）。
+- 偏好项 `voiceVadEnabled` 与 `voiceContinuousMode` 纳入 `UiPreferencesContext`，持久化于服务端 `auth.db`。
+- 录音通过 `VoiceActivityDetector` 挂载 `AnalyserNode`，检测用户发声与句末静音停顿（默认 1500ms），到期触发自动提交，无需手动点击停止。
+- 转录结果通过 `handleVoiceTranscript` 自然追加在输入框既有文本后。开启连续听写时，单句提交后自动续启下一句录音。

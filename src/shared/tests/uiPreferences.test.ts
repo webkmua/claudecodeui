@@ -38,6 +38,8 @@ test('a fresh install gets the documented defaults', () => {
     sidebarVisible: true,
     keepProjectsExpanded: false,
     voiceEnabled: false,
+    voiceVadEnabled: false,
+    voiceContinuousMode: false,
     showTerminalTab: true,
     showQuickSettingsPanel: true,
   });
@@ -119,4 +121,15 @@ test('remembering expanded projects uses the existing preference reader and redu
   const state = readStoredUiPreferences();
   assert.equal(state.keepProjectsExpanded, true);
   assert.equal(uiPreferencesReducer(state, { type: 'set', key: 'keepProjectsExpanded', value: false }).keepProjectsExpanded, false);
+});
+
+test('voiceVadEnabled and voiceContinuousMode can be read and updated via reducer', () => {
+  storeUiPreferences({ voiceVadEnabled: 'true', voiceContinuousMode: true });
+  const state = readStoredUiPreferences();
+  assert.equal(state.voiceVadEnabled, true);
+  assert.equal(state.voiceContinuousMode, true);
+
+  const updated = uiPreferencesReducer(state, { type: 'set', key: 'voiceVadEnabled', value: false });
+  assert.equal(updated.voiceVadEnabled, false);
+  assert.equal(updated.voiceContinuousMode, true);
 });

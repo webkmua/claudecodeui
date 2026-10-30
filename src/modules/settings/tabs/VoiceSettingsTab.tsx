@@ -29,16 +29,50 @@ export default function VoiceSettingsTab() {
   return (
     <div className="space-y-8">
       <SettingsSection title={t('voiceSettings.title')} description={t('voiceSettings.description')}>
-        <div className="flex items-center justify-between rounded-lg border border-border p-3">
-          <div className="pr-3">
-            <div className="text-sm font-medium text-foreground">{t('voiceSettings.enable')}</div>
-            <div className="text-xs text-muted-foreground">{t('voiceSettings.enableDescription')}</div>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between rounded-lg border border-border p-3">
+            <div className="pr-3">
+              <div className="text-sm font-medium text-foreground">{t('voiceSettings.enable')}</div>
+              <div className="text-xs text-muted-foreground">{t('voiceSettings.enableDescription')}</div>
+            </div>
+            <SettingsToggle
+              checked={voiceEnabled}
+              onChange={(v) => setPreference('voiceEnabled', v)}
+              ariaLabel={t('voiceSettings.enable')}
+            />
           </div>
-          <SettingsToggle
-            checked={voiceEnabled}
-            onChange={(v) => setPreference('voiceEnabled', v)}
-            ariaLabel={t('voiceSettings.enable')}
-          />
+
+          {voiceEnabled && (
+            <>
+              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                <div className="pr-3">
+                  <div className="text-sm font-medium text-foreground">{t('voiceSettings.vad', { defaultValue: 'Silence auto-commit (VAD)' })}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {t('voiceSettings.vadDescription', { defaultValue: 'Automatically stop recording and transcribe when you pause speaking.' })}
+                  </div>
+                </div>
+                <SettingsToggle
+                  checked={preferences.voiceVadEnabled}
+                  onChange={(v) => setPreference('voiceVadEnabled', v)}
+                  ariaLabel={t('voiceSettings.vad', { defaultValue: 'Silence auto-commit (VAD)' })}
+                />
+              </div>
+
+              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                <div className="pr-3">
+                  <div className="text-sm font-medium text-foreground">{t('voiceSettings.continuous', { defaultValue: 'Continuous dictation' })}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {t('voiceSettings.continuousDescription', { defaultValue: 'Keep listening for the next phrase after each transcription finishes.' })}
+                  </div>
+                </div>
+                <SettingsToggle
+                  checked={preferences.voiceContinuousMode}
+                  onChange={(v) => setPreference('voiceContinuousMode', v)}
+                  ariaLabel={t('voiceSettings.continuous', { defaultValue: 'Continuous dictation' })}
+                />
+              </div>
+            </>
+          )}
         </div>
       </SettingsSection>
 

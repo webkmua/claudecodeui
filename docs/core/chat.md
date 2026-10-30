@@ -264,3 +264,11 @@ flowchart LR
 execution 模块复用聊天运行登记和应用会话映射，外部派发的会话可在界面查看并处理审批。
 执行模块等待引擎回合结束与后台工作收尾后，才向 `chatRunRegistry` 发送最终 complete；
 MCP 客户端连接断开不关闭会话。运行记录与查询游标由 execution 模块保存，规则见 providers.md「本机执行 MCP」。
+
+## 语音输入与静音自动提交（Voice Input & VAD）
+
+`ChatComposer` 集成 `useVoiceInput` 与 Web Audio `VoiceActivityDetector`：
+- 用户点击麦克风后录音。当开启 `voiceVadEnabled` 时，监听时域 RMS 与频域能量；
+- 当用户发声后并在停顿达到预设静音阈值（默认 1.5s），探测器触发 `onSilence` 自动结束录音并调用 `/api/voice/transcribe`；
+- 转录文本自然追加在输入框文本之后；
+- 支持连续模式（`voiceContinuousMode`），在转录完成后自动续接听写。手动点击停止或发送按钮可立即终止录音与续接。
