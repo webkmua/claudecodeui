@@ -273,4 +273,5 @@ MCP 客户端连接断开不关闭会话。运行记录与查询游标由 execut
 - 探测器自动恢复 AudioContext 挂起状态，通过双帧发声确认滤除单次瞬态杂音（click/pop），在停顿达到预设静音阈值（默认 1.5s）触发 `onSilence` 自动结束录音并调用 `/api/voice/transcribe`；
 - 视觉指示带滞后消抖（hysteresis），平滑辅音短暂停顿；
 - 转录文本自然追加在输入框既有文本后；
-- 支持连续模式（`voiceContinuousMode`），在转录或每句结束后自动续接听写。手动点击停止（录音或转录中）或发送按钮可立即终止录音并完成发送。
+- 支持连续模式（`voiceContinuousMode`），在转录或每句结束后自动续接听写。手动点击停止（录音或转录中）或发送按钮可立即终止录音并完成发送；
+- **识别语言配置（`voiceLanguage`）**：在语音设置与快捷设置抽屉中提供语言切换（Ukrainian `'uk-UA'`、Russian `'ru-RU'`、English `'en-US'` 或 `'auto'` 自适应），由 `resolveRecognitionLanguage` 统一解析并注入 `SpeechRecognition.lang`，解决英文界面下无法识别乌克兰语或俄语语音的问题。

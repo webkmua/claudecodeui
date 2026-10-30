@@ -17,7 +17,7 @@ import { SETTING_ROW_CLASS } from '@/shared/constants';
 import type { PreferenceToggleKey, QuickSettingsPreferences } from '@/shared/types';
 import QuickSettingsSection from '@/modules/quick-settings-panel/QuickSettingsSection';
 import QuickSettingsToggleRow from '@/modules/quick-settings-panel/QuickSettingsToggleRow';
-import { isWebSpeechSupported } from '@/shared/webSpeechRecognition';
+import { isWebSpeechSupported, VOICE_LANGUAGE_OPTIONS } from '@/shared/webSpeechRecognition';
 
 /** Declarative description of one quick settings toggle row - its preference key, translation key and icon - so the rows can be rendered from a list instead of hand-written. */
 type PreferenceToggleItem = {
@@ -65,14 +65,18 @@ const INPUT_SETTING_TOGGLES: PreferenceToggleItem[] = [
 type QuickSettingsContentProps = {
   isDarkMode: boolean;
   preferences: QuickSettingsPreferences;
+  voiceLanguage?: string;
   onPreferenceChange: (key: PreferenceToggleKey, value: boolean) => void;
+  onVoiceLanguageChange?: (value: string) => void;
 };
 
 /** Rendered by QuickSettingsPanelView to show the drawer's appearance, tool display and input preference rows. */
 export default function QuickSettingsContent({
   isDarkMode,
   preferences,
+  voiceLanguage,
   onPreferenceChange,
+  onVoiceLanguageChange,
 }: QuickSettingsContentProps) {
   const { t } = useTranslation('settings');
   const webSpeechSupported = isWebSpeechSupported();
@@ -118,6 +122,28 @@ export default function QuickSettingsContent({
 
       <QuickSettingsSection title={t('quickSettings.sections.inputSettings')}>
         {renderToggleRows(inputSettingToggles)}
+        {preferences.voiceEnabled && (
+          <div className="flex items-center justify-between rounded-lg border border-transparent bg-muted/50 p-3 transition-colors hover:border-border hover:bg-accent">
+            <span className="flex items-center gap-2 text-sm text-foreground">
+              <Languages className="h-4 w-4 text-muted-foreground" />
+              {t('quickSettings.voiceLanguage', { defaultValue: 'Voice language' })}
+            </span>
+            <select
+              value={voiceLanguage || 'auto'}
+              onChange={(e) => onVoiceLanguageChange?.(e.target.value)}
+              className="w-auto min-w-[120px] max-w-[160px] rounded-lg border border-input bg-card p-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary"
+              aria-label={t('quickSettings.voiceLanguage', { defaultValue: 'Voice language' })}
+            >
+              {VOICE_LANGUAGE_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.value === 'auto'
+                    ? t('voiceSettings.languageAuto', { defaultValue: 'Auto (Browser)' })
+                    : opt.nativeName}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
         <p className="ml-3 text-xs text-muted-foreground">
           {t('quickSettings.sendByCtrlEnterDescription')}
         </p>

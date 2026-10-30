@@ -23,6 +23,8 @@ export type UiPreferences = {
   voiceContinuousMode: boolean;
   /** Uses browser Web Speech API for real-time live streaming dictation instead of server STT. */
   voiceWebSpeechStreaming: boolean;
+  /** Speech recognition language ('auto' or specific BCP-47 tag like 'uk-UA', 'ru-RU', 'en-US'). */
+  voiceLanguage: string;
   /** Hides the workspace terminal tab entry while keeping the terminal itself functional. */
   showTerminalTab: boolean;
   /** Hides the workspace quick settings drawer and its draggable edge handle. */
@@ -45,6 +47,7 @@ const DEFAULTS: UiPreferences = {
   voiceVadEnabled: false,
   voiceContinuousMode: false,
   voiceWebSpeechStreaming: false,
+  voiceLanguage: 'auto',
   showTerminalTab: true,
   showQuickSettingsPanel: true,
 };
@@ -67,6 +70,24 @@ const parseBoolean = (value: unknown, fallback: boolean): boolean => {
   return fallback;
 };
 
+const parseString = (value: unknown, fallback: string): string => {
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim();
+  }
+  return fallback;
+};
+
+const parsePreference = (
+  key: UiPreferenceKey,
+  value: unknown,
+  fallback: UiPreferences[UiPreferenceKey],
+): UiPreferences[UiPreferenceKey] => {
+  if (key === 'voiceLanguage') {
+    return parseString(value, fallback as string);
+  }
+  return parseBoolean(value, fallback as boolean);
+};
+
 /**
  * Reads the stored preferences, filling in a default for anything the user has
  * never toggled. Synchronous, because the sidebar's visibility and the composer's
@@ -76,7 +97,7 @@ export const readStoredUiPreferences = (): UiPreferences => {
   const stored = readUserPreference<Record<string, unknown>>('uiPreferences', {});
 
   return PREFERENCE_KEYS.reduce((acc, key) => {
-    acc[key] = parseBoolean(stored[key], DEFAULTS[key]);
+    (acc as Record<string, unknown>)[key] = parsePreference(key, stored[key], DEFAULTS[key]);
     return acc;
   }, { ...DEFAULTS });
 };
@@ -92,7 +113,7 @@ export function uiPreferencesReducer(
         return state;
       }
 
-      const nextValue = parseBoolean(value, state[key]);
+      const nextValue = parsePreference(key, value, state[key]);
       // Returning the same object keeps consumers from re-rendering on a no-op.
       return state[key] === nextValue ? state : { ...state, [key]: nextValue };
     }
@@ -104,9 +125,9 @@ export function uiPreferencesReducer(
       for (const key of PREFERENCE_KEYS) {
         if (!(key in updates)) continue;
 
-        const nextValue = parseBoolean(updates[key], state[key]);
+        const nextValue = parsePreference(key, updates[key], state[key]);
         if (nextState[key] !== nextValue) {
-          nextState[key] = nextValue;
+          (nextState as Record<string, unknown>)[key] = nextValue;
           changed = true;
         }
       }

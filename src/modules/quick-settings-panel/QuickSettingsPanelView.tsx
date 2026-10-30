@@ -153,7 +153,9 @@ function QuickSettingsPanelView({ selectedProject, onInsertCommand }: QuickSetti
           <QuickSettingsContent
             isDarkMode={isDarkMode}
             preferences={quickSettingsPreferences}
+            voiceLanguage={preferences.voiceLanguage}
             onPreferenceChange={handlePreferenceChange}
+            onVoiceLanguageChange={(value) => setPreference('voiceLanguage', value)}
           />
         ) : (
           <QuickSettingsCommandsTab

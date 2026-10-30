@@ -180,7 +180,7 @@ HTML、PDF 导出通过 assets API 顺序读取引用的资源并内嵌 data URL
 ## 语音输入、实时流式识别与客户端 VAD
 
 输入区支持 Push-to-Talk 录音、客户端语音活动检测（VAD，静音自动提交）以及浏览器原生实时流式听写（Web Speech API）。
-- 偏好项 `voiceEnabled`、`voiceVadEnabled`、`voiceContinuousMode` 及 `voiceWebSpeechStreaming` 纳入 `UiPreferencesContext`，持久化于服务端 `auth.db`。
-- **实时流式模式（Web Speech）**：当浏览器支持 `webkitSpeechRecognition` / `SpeechRecognition` 时，可在设置中开启实时流式听写。启用 `interimResults: true` 与 `continuous: true`，随着用户讲话，识别中间结果实时显示在输入框中；分句提交后自动作为基底合并，支持连续听写。
+- 偏好项 `voiceEnabled`、`voiceVadEnabled`、`voiceContinuousMode`、`voiceWebSpeechStreaming` 及 `voiceLanguage`（支持 Ukrainian、Russian、English 及 Auto 浏览器自适应）纳入 `UiPreferencesContext`，持久化于服务端 `auth.db`。
+- **实时流式模式（Web Speech）与识别语言**：当浏览器支持 `webkitSpeechRecognition` / `SpeechRecognition` 时，可在设置中开启实时流式听写。启用 `interimResults: true` 与 `continuous: true`，随着用户讲话，识别中间结果实时显示在输入框中；分句提交后自动作为基底合并，支持连续听写。语音识别语言可通过设置或快捷设置抽屉随时切换，`resolveRecognitionLanguage` 统一规范化为目标 BCP-47 标签。
 - **服务端模式与 VAD**：录音通过 `VoiceActivityDetector` 挂载 `AnalyserNode`，检测用户发声与句末静音停顿（默认 1500ms），到期触发自动提交，无需手动点击停止。
 - 转录结果通过 `handleVoiceTranscript` 自然追加在输入框既有文本后。开启连续听写时，单句提交后自动续启下一句录音。

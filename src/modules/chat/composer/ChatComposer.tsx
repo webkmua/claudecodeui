@@ -307,7 +307,7 @@ function ChatComposer({
       vadEnabled: preferences.voiceVadEnabled,
       continuous: preferences.voiceContinuousMode,
       webSpeechStreaming: preferences.voiceWebSpeechStreaming,
-      lang: i18n.language,
+      lang: preferences.voiceLanguage,
       onStart: onVoiceStart,
       onEnd: onVoiceEnd,
     },

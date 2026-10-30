@@ -41,6 +41,7 @@ test('a fresh install gets the documented defaults', () => {
     voiceVadEnabled: false,
     voiceContinuousMode: false,
     voiceWebSpeechStreaming: false,
+    voiceLanguage: 'auto',
     showTerminalTab: true,
     showQuickSettingsPanel: true,
   });
@@ -142,5 +143,17 @@ test('voiceWebSpeechStreaming can be read and updated via reducer', () => {
 
   const updated = uiPreferencesReducer(state, { type: 'set', key: 'voiceWebSpeechStreaming', value: false });
   assert.equal(updated.voiceWebSpeechStreaming, false);
+});
+
+test('voiceLanguage can be read and updated via reducer with custom language tag', () => {
+  storeUiPreferences({ voiceLanguage: 'uk-UA' });
+  const state = readStoredUiPreferences();
+  assert.equal(state.voiceLanguage, 'uk-UA');
+
+  const updated = uiPreferencesReducer(state, { type: 'set', key: 'voiceLanguage', value: 'ru-RU' });
+  assert.equal(updated.voiceLanguage, 'ru-RU');
+
+  const backToAuto = uiPreferencesReducer(updated, { type: 'set', key: 'voiceLanguage', value: 'auto' });
+  assert.equal(backToAuto.voiceLanguage, 'auto');
 });
 

@@ -7,6 +7,7 @@ import {
   getSpeechRecognitionConstructor,
   isWebSpeechSupported,
   resolveRecognitionLanguage,
+  VOICE_LANGUAGE_OPTIONS,
   type SpeechRecognitionInstance,
 } from '@/shared/webSpeechRecognition';
 
@@ -41,6 +42,7 @@ describe('webSpeechRecognition utils', () => {
   describe('resolveRecognitionLanguage', () => {
     it('maps known short language codes to full BCP-47 tags', () => {
       assert.equal(resolveRecognitionLanguage('uk'), 'uk-UA');
+      assert.equal(resolveRecognitionLanguage('ru'), 'ru-RU');
       assert.equal(resolveRecognitionLanguage('en'), 'en-US');
       assert.equal(resolveRecognitionLanguage('es'), 'es-ES');
       assert.equal(resolveRecognitionLanguage('de'), 'de-DE');
@@ -53,12 +55,43 @@ describe('webSpeechRecognition utils', () => {
     it('preserves valid custom BCP-47 tags with hyphen', () => {
       assert.equal(resolveRecognitionLanguage('en-GB'), 'en-GB');
       assert.equal(resolveRecognitionLanguage('uk-UA'), 'uk-UA');
+      assert.equal(resolveRecognitionLanguage('ru-RU'), 'ru-RU');
       assert.equal(resolveRecognitionLanguage('pt-BR'), 'pt-BR');
     });
 
     it('falls back to navigator.language or uk-UA if unsupplied', () => {
       const resolved = resolveRecognitionLanguage();
       assert.ok(typeof resolved === 'string' && resolved.length > 0);
+    });
+
+    it('resolves navigator.languages when preferredLang is auto', () => {
+      const origLanguages = navigator.languages;
+      try {
+        Object.defineProperty(navigator, 'languages', {
+          value: ['ru-RU', 'en-US'],
+          configurable: true,
+        });
+        assert.equal(resolveRecognitionLanguage('auto'), 'ru-RU');
+
+        Object.defineProperty(navigator, 'languages', {
+          value: ['uk'],
+          configurable: true,
+        });
+        assert.equal(resolveRecognitionLanguage('auto'), 'uk-UA');
+      } finally {
+        Object.defineProperty(navigator, 'languages', {
+          value: origLanguages,
+          configurable: true,
+        });
+      }
+    });
+
+    it('includes required voice language options', () => {
+      const values = VOICE_LANGUAGE_OPTIONS.map((opt) => opt.value);
+      assert.ok(values.includes('auto'));
+      assert.ok(values.includes('uk-UA'));
+      assert.ok(values.includes('ru-RU'));
+      assert.ok(values.includes('en-US'));
     });
   });
 

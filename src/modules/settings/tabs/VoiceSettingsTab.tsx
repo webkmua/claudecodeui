@@ -5,7 +5,7 @@ import SettingsSection from '@/modules/settings/SettingsSection';
 import SettingsToggle from '@/modules/settings/SettingsToggle';
 import { useUiPreferences, useSetUiPreference } from '@/shared/context/UiPreferencesContext';
 import { useVoiceConfig } from '@/modules/settings/hooks/useVoiceConfig';
-import { isWebSpeechSupported } from '@/shared/webSpeechRecognition';
+import { isWebSpeechSupported, VOICE_LANGUAGE_OPTIONS } from '@/shared/webSpeechRecognition';
 
 const inputClass =
   'w-full rounded-md border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring';
@@ -65,6 +65,33 @@ export default function VoiceSettingsTab() {
                   />
                 </div>
               )}
+
+              <div className="flex items-center justify-between rounded-lg border border-border p-3">
+                <div className="pr-3">
+                  <div className="text-sm font-medium text-foreground">
+                    {t('voiceSettings.language', { defaultValue: 'Recognition language' })}
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {t('voiceSettings.languageDescription', {
+                      defaultValue: 'Language expected for speech recognition (Web Speech).',
+                    })}
+                  </div>
+                </div>
+                <select
+                  value={preferences.voiceLanguage || 'auto'}
+                  onChange={(e) => setPreference('voiceLanguage', e.target.value)}
+                  className="w-auto min-w-[140px] max-w-[200px] rounded-lg border border-input bg-card p-2 text-sm text-foreground focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary"
+                  aria-label={t('voiceSettings.language', { defaultValue: 'Recognition language' })}
+                >
+                  {VOICE_LANGUAGE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.value === 'auto'
+                        ? t('voiceSettings.languageAuto', { defaultValue: 'Auto (Browser)' })
+                        : `${opt.nativeName} (${opt.value})`}
+                    </option>
+                  ))}
+                </select>
+              </div>
 
               <div className="flex items-center justify-between rounded-lg border border-border p-3">
                 <div className="pr-3">

@@ -105,6 +105,22 @@ describe('useVoiceInput Web Speech streaming', () => {
 
     assert.equal(result.current.state, 'recording');
     assert.equal(onStart.mock.calls.length, 1);
+    assert.equal(MockSpeechRecognition.latestInstance?.lang, 'uk-UA');
+  });
+
+  it('sets recognition language for Russian when configured', async () => {
+    const { result } = renderHook(() =>
+      useVoiceInput(vi.fn(), undefined, {
+        webSpeechStreaming: true,
+        lang: 'ru-RU',
+      }),
+    );
+
+    await act(async () => {
+      result.current.toggle();
+    });
+
+    assert.equal(MockSpeechRecognition.latestInstance?.lang, 'ru-RU');
   });
 
   it('streams interim and final transcripts in real time', async () => {
